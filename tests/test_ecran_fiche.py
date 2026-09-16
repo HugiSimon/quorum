@@ -51,6 +51,9 @@ async def main() -> None:
             # La table : une règle ajoutée, sa décision changée, l'ordre inversé.
             table = ecran.query_one(TableRegles)
             table.focus()
+            await pilot.pause(0.1)
+            assert "▌" in table.texte_brut, "la règle visée s'allume dès le focus"
+            assert "a ajouter" in table.texte_brut, "les touches de la table sont écrites"
             depart = len(table.regles)
             await pilot.press("a")
             await attendre(pilot, lambda: bool(ecran.query("#motif")), "la saisie du motif")

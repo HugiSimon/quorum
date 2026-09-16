@@ -36,10 +36,19 @@ async def scenario_salle() -> None:
 
             liste = ecran.query_one(ListeParticipants)
             assert liste.choisis == ["faux1", "faux2"], liste.choisis
+
+            # La ligne visée s'allume dès la prise de focus, sans avoir à bouger d'abord.
             liste.focus()
+            await pilot.pause(0.1)
+            assert "▌" in liste.texte_brut, liste.texte_brut
+            assert "⏎ ajouter ou retirer" in liste.texte_brut, "la touche doit être écrite"
+
             await pilot.press("down")
-            await pilot.press("space")
+            await pilot.press("enter")
             assert liste.choisis == ["faux1"], liste.choisis
+            await pilot.press("enter")
+            assert liste.choisis == ["faux1", "faux2"], liste.choisis
+            await pilot.press("enter")
 
             enchainements = next(p for p in ecran.query(Pas) if p.etiquette == "enchaînements")
             enchainements.focus()

@@ -201,25 +201,28 @@ class TableRegles(Static):
         self.curseur = 0
 
     def on_mount(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
-    def rafraichir(self) -> None:
+    def rafraichir(self, actif: bool | None = None) -> None:
+        actif = self.has_focus if actif is None else actif
         texte = Text()
         texte.append_text(regle("PERMISSIONS", 70, "première règle qui gagne"))
         texte.append(f"    {'MOTIF':<24}{'DÉCISION':<18}PORTÉE\n", style=N["faible"])
         for index, ligne in enumerate(self.regles):
-            vise = index == self.curseur and self.has_focus
+            vise = index == self.curseur and actif
             decision, portee = ligne.libelles
             couleur = {"allow": VERT, "deny": ROUGE, "ask_user": ATTENTION}[ligne.decision]
-            texte.append("  ▌ " if vise else "    ", style=CLIQUABLE)
-            texte.append(f"{ligne.motif:<24}", style=N["encre"])
-            texte.append(f"{decision:<18}", style=couleur)
-            texte.append(f"{portee}\n", style=N["faible"])
-        if self.has_focus:
-            texte.append(
-                "    a ajouter · e modifier le motif · d décision · x retirer · ⇧↑↓ réordonner\n",
-                style=N["faible"],
-            )
+            fond = f" on {N['panneau']}" if vise else ""
+            texte.append("  ▌ " if vise else "    ", style=(CLIQUABLE if vise else N["cadre"]) + fond)
+            texte.append(f"{ligne.motif:<24}", style=(f"bold {N['encre']}" if vise else N["encre"]) + fond)
+            texte.append(f"{decision:<18}", style=couleur + fond)
+            texte.append(f"{portee:<16}\n", style=(N["dim"] if vise else N["faible"]) + fond)
+        for touche, quoi in (("a", "ajouter"), ("e", "modifier le motif"),
+                             ("d", "décision"), ("x", "retirer"), ("⇧↑↓", "réordonner")):
+            texte.append(f"    {touche} " if touche == "a" else f"{touche} ",
+                         style=CLIQUABLE if actif else N["cadre"])
+            texte.append(f"{quoi}   ", style=N["dim"] if actif else N["faible"])
+        texte.append("\n")
         texte.append(
             "    les outils en lecture seule de l'agent passent avant la règle par défaut\n",
             style=N["faible"],
@@ -228,10 +231,10 @@ class TableRegles(Static):
         self.texte_brut = texte.plain
 
     def on_focus(self) -> None:
-        self.rafraichir()
+        self.rafraichir(True)
 
     def on_blur(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
     def on_key(self, evenement) -> None:
         touche = evenement.key
@@ -264,7 +267,7 @@ class TableRegles(Static):
             self.curseur = min(self.curseur, len(self.regles) - 1)
         else:
             return
-        self.rafraichir()
+        self.rafraichir(True)
         self.screen.rafraichir_jauge()
 
 
@@ -445,7 +448,7 @@ class EcranFicheBot(Navigable):
 
 
 class ListeParticipants(Static):
-    """Les membres d'une salle : espace pour ajouter ou retirer."""
+    """Les membres d'une salle : ⏎ ajoute ou retire celui qu'on vise."""
 
     can_focus = True
 
@@ -457,40 +460,49 @@ class ListeParticipants(Static):
         self.curseur = 0
 
     def on_mount(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
-    def rafraichir(self) -> None:
+    def rafraichir(self, actif: bool | None = None) -> None:
+        """`actif` est passé explicitement : `has_focus` ment encore au moment du focus,
+        et la ligne visée ne s'allumait qu'après une première flèche."""
+        actif = self.has_focus if actif is None else actif
         texte = Text()
-        texte.append_text(regle("PARTICIPANTS", 70, "espace pour ajouter"))
+        texte.append_text(regle("PARTICIPANTS", 70))
         for index, nom in enumerate(self.ordre):
             bot = self.connus[nom]
             dedans = nom in self.choisis
-            vise = index == self.curseur and self.has_focus
-            texte.append("  ▌ " if vise else "    ", style=CLIQUABLE)
-            texte.append("✓ " if dedans else "· ", style=VERT if dedans else N["faible"])
-            texte.append(f"@{nom:<12}", style=couleur_bot(bot.teinte) if dedans else N["dim"])
-            texte.append(f"{bot.role:<14}", style=N["dim"])
+            vise = index == self.curseur and actif
+            fond = f" on {N['panneau']}" if vise else ""
+            texte.append("  ▌ " if vise else "    ", style=(CLIQUABLE if vise else N["cadre"]) + fond)
+            texte.append("✓ " if dedans else "· ", style=(VERT if dedans else N["faible"]) + fond)
+            texte.append(f"@{nom:<12}",
+                         style=(couleur_bot(bot.teinte) if dedans else N["dim"]) + fond
+                         + (" bold" if vise else ""))
+            texte.append(f"{bot.role:<14}", style=(N["encre"] if vise else N["dim"]) + fond)
             niveau, _ = bots.pouvoir(bots.lire_regles(bot.dossier))
-            texte.append(
-                "pouvoir élevé" if niveau >= 5 else "lecture seule" if niveau <= 2 else "modéré",
-                style=N["faible"],
-            )
-            texte.append("" if dedans else "  hors salle", style=N["faible"])
-            texte.append("\n")
+            pouvoir = ("pouvoir élevé" if niveau >= 5
+                       else "lecture seule" if niveau <= 2 else "pouvoir modéré")
+            texte.append(f"{pouvoir:<16}", style=(N["dim"] if vise else N["faible"]) + fond)
+            texte.append(f"{'' if dedans else 'hors salle':<12}\n",
+                         style=(N["dim"] if vise else N["faible"]) + fond)
+        texte.append("    ⏎ ", style=CLIQUABLE if actif else N["cadre"])
+        texte.append("ajouter ou retirer   ", style=N["dim"] if actif else N["faible"])
+        texte.append("↑↓ ", style=CLIQUABLE if actif else N["cadre"])
+        texte.append("parcourir la liste\n", style=N["dim"] if actif else N["faible"])
         self.update(texte)
         self.texte_brut = texte.plain
 
     def on_focus(self) -> None:
-        self.rafraichir()
+        self.rafraichir(True)
 
     def on_blur(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
     def on_key(self, evenement) -> None:
         if evenement.key in ("up", "down") and self.ordre:
             evenement.stop()
             self.curseur = (self.curseur + (1 if evenement.key == "down" else -1)) % len(self.ordre)
-        elif evenement.key == "space" and self.ordre:
+        elif evenement.key in ("enter", "space") and self.ordre:
             evenement.stop()
             nom = self.ordre[self.curseur]
             if nom in self.choisis:
@@ -500,7 +512,7 @@ class ListeParticipants(Static):
             self.screen.rafraichir_pied()
         else:
             return
-        self.rafraichir()
+        self.rafraichir(True)
 
 
 class EcranSalle(Navigable):
