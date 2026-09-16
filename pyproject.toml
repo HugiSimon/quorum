@@ -3,6 +3,9 @@ name = "quorum"
 version = "0.1.0"
 description = "One room, several agents, a single thread."
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+readme = "README.md"
 dependencies = ["textual>=1.0"]
 
 [project.scripts]

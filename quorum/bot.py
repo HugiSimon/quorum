@@ -15,18 +15,28 @@ from string import Template
 
 
 # The pattern is what the user writes in the bot card; the TOML rule is what the permission
-# engine reads. This table translates both ways.
+# engine reads. This table translates both ways, and it must translate *everything*: a rule
+# the table cannot name used to be shown as "everything else", and saving the card wrote
+# that back as a rule with no criteria — an allow-all, silently.
 PATTERNS = (
     ("shell:", {"toolName": "run_shell_command"}, "commandPrefix"),
+    ("shell~", {"toolName": "run_shell_command"}, "argsPattern"),
     ("fs:read", {"toolName": "read_file"}, None),
     ("fs:write", {"toolName": "write_file"}, None),
     ("fs:replace", {"toolName": "replace"}, None),
     ("fs:list", {"toolName": "list_directory"}, None),
     ("fs:search", {"toolName": "search_file_content"}, None),
+    ("fs:glob", {"toolName": "glob"}, None),
     ("net:fetch", {"toolName": "web_fetch"}, None),
     ("net:search", {"toolName": "google_web_search"}, None),
     ("mcp:", {}, "mcpName"),
 )
+
+# Last resort: a tool the table above does not name — another provider's, an MCP server's.
+# Named by its own name rather than collapsed into the catch-all.
+# ponytail: `commandRegex` (shell only, gemini) has no pattern of its own; it would still
+# read as the catch-all. Give it one the day a policy uses it.
+GENERIC = ("tool:", {}, "toolName")
 
 DECISIONS = {
     "allow": ("✓ allowed", "always"),
@@ -149,11 +159,15 @@ def write_toml(tables: list[tuple[str, dict]], header: str = "") -> str:
 def rule_to_toml(rule: Rule, priority: int) -> dict:
     """Translates a bot-card pattern into fields the permission engine understands."""
     fields: dict = {}
-    for prefix, fixed, free_field in PATTERNS:
+    for prefix, fixed, free_field in PATTERNS + (GENERIC,):
         if not rule.pattern.startswith(prefix):
             continue
         fields.update(fixed)
-        rest = rule.pattern[len(prefix):].strip().rstrip("*").strip()
+        rest = rule.pattern[len(prefix):].strip()
+        # The trailing star belongs to the written pattern, not to the value — except in a
+        # regex, where a star is the regex's own and eating it changes what it matches.
+        if free_field != "argsPattern":
+            rest = rest.rstrip("*").strip()
         if free_field and rest:
             fields[free_field] = rest
         break
@@ -163,15 +177,26 @@ def rule_to_toml(rule: Rule, priority: int) -> dict:
 
 
 def toml_to_pattern(fields: dict) -> str:
-    """Rebuilds the displayable pattern of a rule read from disk."""
+    """Rebuilds the displayable pattern of a rule read from disk.
+
+    The most precise pattern wins: a shell rule narrowed by an args regex is shown as that
+    regex, not as "every shell command". Only a rule with no criteria at all is the catch-all.
+    """
+    widest = None
     for prefix, fixed, free_field in PATTERNS:
-        if fixed and all(fields.get(k) == v for k, v in fixed.items()):
-            if not free_field:
-                return prefix
-            rest = fields.get(free_field)
-            return f"{prefix}{rest} *" if rest else f"{prefix}*"
-        if not fixed and free_field and fields.get(free_field):
-            return f"{prefix}{fields[free_field]}"
+        if not all(fields.get(key) == value for key, value in fixed.items()):
+            continue
+        if free_field is None:
+            return prefix
+        rest = fields.get(free_field)
+        if rest:
+            return f"{prefix}{rest} *" if free_field == "commandPrefix" else f"{prefix}{rest}"
+        if fixed and widest is None:
+            widest = f"{prefix}*"
+    if widest:
+        return widest
+    if fields.get(GENERIC[2]):
+        return f"{GENERIC[0]}{fields[GENERIC[2]]}"
     return "everything else"
 
 

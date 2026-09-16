@@ -22,6 +22,9 @@ def main() -> None:
         Rule("shell:*", "deny"),
         Rule("shell:git *", "allow"),
         Rule("shell:rm *", "ask_user"),
+        Rule("shell~push", "ask_user"),
+        Rule("fs:glob", "allow"),
+        Rule("tool:some_new_tool", "allow"),
         Rule("fs:write", "ask_user"),
         Rule("net:fetch", "deny"),
         Rule("mcp:vault", "deny"),
@@ -53,9 +56,22 @@ def main() -> None:
         _, args, _ = launch(back)
         assert "--policy" in args and str(folder / "policy.toml") in args, args
 
+        # A rule the card cannot name used to be read as "everything else", and written back
+        # as a rule with no criteria at all: opening a bot and saving it turned one allowed
+        # tool into every tool allowed. Nothing may widen on a round trip.
+        catch_alls = [r for r in rendered if r.pattern == "everything else"]
+        assert len(catch_alls) == 1 and catch_alls[0].decision == "ask_user", catch_alls
+        for starter in sorted((Path(__file__).resolve().parents[1] / "quorum" / "starter"
+                               / "bots").iterdir()):
+            shipped = read_rules(starter)
+            wide = [r for r in shipped if r.pattern == "everything else"]
+            assert len(wide) == 1, f"{starter.name}: {[r.pattern for r in shipped]}"
+            assert wide[0].decision != "allow", f"{starter.name} ships an allow-all"
+            assert wide[-1] is shipped[-1], f"{starter.name}: the catch-all is not last"
+
         level, phrase = power(rules)
         assert "runs commands" in phrase and "changes no file" in phrase, phrase
-        assert "3 guards, 3 denials" in phrase, phrase
+        assert "4 guards, 3 denials" in phrase, phrase
         assert 1 <= level <= 7, level
 
         # A bot with no allowed rule at all sits at the bottom.

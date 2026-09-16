@@ -48,12 +48,6 @@ Nothing is compiled: the script installs [uv](https://docs.astral.sh/uv/) if it 
 then quorum as a tool — its own isolated environment, a `quorum` command in `~/.local/bin`.
 To remove it: `uv tool uninstall quorum`.
 
-While the repository is private, the one-liner cannot read it. Install it directly instead:
-
-```sh
-uv tool install git+ssh://git@github.com/HugiSimon/quorum
-```
-
 You need at least one agent that speaks **ACP** (Agent Client Protocol):
 
 | Provider | Command |
@@ -128,7 +122,17 @@ absolute path and it stays pinned to one project; the room screen (`^O`) writes 
   settings.json  its settings — isolates the bot from the machine's personal MCP servers
 ```
 
-Everything is editable by hand; the card (`^B`) writes exactly those files.
+Everything is editable by hand; the card (`^B`) writes exactly those files. Its permission
+table reads one pattern per rule, and writes back exactly what it shows:
+
+| pattern | the rule it writes |
+|---|---|
+| `shell:git *` | that root command, `commandPrefix` |
+| `shell~push` | a regex over the arguments, `argsPattern` — `git push`, but not `git log` |
+| `fs:read` `fs:write` `fs:replace` `fs:list` `fs:search` `fs:glob` | one file tool each |
+| `net:fetch` `net:search` · `mcp:vault` | the network tools · one MCP server |
+| `tool:anything_else` | a tool this table does not name — another provider's, an MCP one |
+| `everything else` | no criteria: what is left. **The last line of every shipped bot, and it asks** |
 
 Whatever depends on the machine (company certificate, proxy) goes through the bot's `env`
 block as `${VARIABLE}`, resolved from `~/.quorum/.env`. See `.env.example`.

@@ -3,14 +3,14 @@
 
 [[rules]]
 toolName = "run_shell_command"
-argsPattern = "rm "
+commandPrefix = "rm"
 decision = "ask_user"
 priority = 95
 denyMessage = "deletion: I always ask"
 
 [[rules]]
 toolName = "run_shell_command"
-argsPattern = "sudo"
+commandPrefix = "sudo"
 decision = "ask_user"
 priority = 95
 
