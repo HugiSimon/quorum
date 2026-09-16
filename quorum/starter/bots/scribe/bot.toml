@@ -1,0 +1,8 @@
+name = "scribe"
+role = "writing"
+hue = 320
+
+command = "gemini"
+args = ["--acp"]
+model = ""
+provider = "gemini"

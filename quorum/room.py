@@ -72,13 +72,18 @@ class Room:
     evict_minutes: int = 0
 
 
-def load_room(project_root: Path, name: str) -> Room:
-    """Reads rooms/<name>/room.toml. The work folder is relative to the project root."""
+def load_room(project_root: Path, name: str, here: Path | None = None) -> Room:
+    """Reads rooms/<name>/room.toml.
+
+    An absolute `folder` pins the room to one project. A relative one — `.` in the rooms
+    that ship with quorum — is resolved against `here`, the folder the command was launched
+    from: the same room then works wherever you call it.
+    """
     root = project_root / "rooms" / name
     conf = tomllib.loads((root / "room.toml").read_text(encoding="utf-8"))
     folder = Path(conf.get("folder", ".")).expanduser()
     if not folder.is_absolute():
-        folder = (project_root / folder).resolve()
+        folder = ((here or project_root) / folder).resolve()
     return Room(
         name=conf.get("name", name),
         folder=folder,
@@ -151,7 +156,7 @@ def ago(moment: float) -> str:
     return time.strftime("%d %b", time.localtime(moment))
 
 
-def room_summaries(root: Path) -> list[dict]:
+def room_summaries(root: Path, here: Path | None = None) -> list[dict]:
     """What home needs to know about each room, without opening a single session."""
     folder = root / "rooms"
     if not folder.exists():
@@ -160,12 +165,13 @@ def room_summaries(root: Path) -> list[dict]:
     for path in sorted(folder.iterdir()):
         if not (path / "room.toml").exists():
             continue
-        room = load_room(root, path.name)
+        room = load_room(root, path.name, here)
         thread = path / "transcript.jsonl"
         messages = sum(1 for _ in thread.open(encoding="utf-8")) if thread.exists() else 0
         rooms.append({
             "name": room.name,
             "members": room.members,
+            "folder": room.folder,
             "messages": messages,
             "when": ago(thread.stat().st_mtime) if thread.exists() else "never opened",
             "at": thread.stat().st_mtime if thread.exists() else 0.0,
@@ -281,8 +287,26 @@ if __name__ == "__main__":
     assert ago(time.time() - 600).startswith("10 min ago")
     assert ago(time.time() - 7200).startswith("2 h ago")
 
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home, elsewhere = Path(tmp) / "home", Path(tmp) / "elsewhere"
+        (home / "rooms" / "here").mkdir(parents=True)
+        elsewhere.mkdir()
+        (home / "rooms" / "here" / "room.toml").write_text(
+            'name = "here"\nfolder = "."\nmembers = []\n', encoding="utf-8"
+        )
+        assert load_room(home, "here", elsewhere).folder == elsewhere.resolve(), \
+            "a relative folder follows the folder quorum was launched from"
+        assert load_room(home, "here").folder == home.resolve(), "without it, the home"
+        (home / "rooms" / "here" / "room.toml").write_text(
+            f'name = "here"\nfolder = "{home}"\nmembers = []\n', encoding="utf-8"
+        )
+        assert load_room(home, "here", elsewhere).folder == home, \
+            "an absolute folder pins the room, wherever it is opened"
+
     summary = thread_summary(entries)
     assert "[room resume]" in summary and "3 messages" in summary, summary
     assert "Do not call any tool" in summary
 
-    print("room: recipients ok · delta ok · isolation ok · handoffs ok · fingerprint ok · steps ok · resume ok")
+    print("room: recipients ok · delta ok · isolation ok · handoffs ok · fingerprint ok · steps ok · folder ok · resume ok")

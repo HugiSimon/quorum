@@ -1,0 +1,7 @@
+# One changes, the other checks.
+name = "pair"
+folder = "."           # relative: the folder you launched quorum from
+members = ["forge", "scout"]
+
+max_rounds = 3         # 0 = the bots never answer each other
+stop_on_repeat = true

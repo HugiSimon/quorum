@@ -1477,12 +1477,25 @@ class Quorum(App):
         ), return_exceptions=True)
 
 
+USAGE = """quorum — one room, several agents, a single thread.
+
+  quorum            home: resume a room, create one, manage the bots
+  quorum <room>     open that room directly
+
+The bots work in the folder you launch it from. Your rooms, bots and threads live in
+{home} (QUORUM_HOME to move them)."""
+
+
 def main() -> None:
     """Home, then a room, then home: ^Q comes back, ^Q at home quits."""
-    root = Path(__file__).resolve().parents[1]
+    root = config.seed(config.home())
+    here = Path.cwd()
     asked = sys.argv[1] if len(sys.argv) > 1 else None
+    if asked in ("-h", "--help"):
+        print(USAGE.format(home=root))
+        return
     while True:
-        name = asked or Home(root).run()
+        name = asked or Home(root, here).run()
         asked = None
         if not name:
             return
@@ -1490,7 +1503,7 @@ def main() -> None:
         if not path.exists():
             print(f"no room named « {name} » in {root / 'rooms'}")
             return
-        room = load_room(root, name)
+        room = load_room(root, name, here)
         Quorum(room, bots.load_all(root / "bots")).run()
 
 

@@ -3,6 +3,5 @@ __pycache__/
 *.pyc
 .env
 runtime/
-rooms/*/transcript.jsonl
-rooms/*/state.json
-rooms/*/transcript-*.jsonl
+.home/
+dist/

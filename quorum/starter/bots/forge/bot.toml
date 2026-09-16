@@ -1,0 +1,8 @@
+name = "forge"
+role = "execution"
+hue = 150
+
+command = "gemini"
+args = ["--acp"]
+model = ""
+provider = "gemini"

@@ -1,0 +1,8 @@
+name = "scout"
+role = "research"
+hue = 250
+
+command = "gemini"
+args = ["--acp"]
+model = ""           # empty: we leave the provider's default
+provider = "gemini"

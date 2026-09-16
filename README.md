@@ -9,14 +9,14 @@ can call each other out with `@name`. Permission requests come up to the user, w
 refuses, or refuses and explains why.
 
 ```
-◈ atlas / auth-rework · turn 12                               ◐2 ▸1 ·2
+◈ pair / ~/dev/atlas · turn 12                                ◐1 ▸1
 
   ▌ you · 14:02
-    @sonar look at how we validate tokens, and @audit tell me whether key
-    rotation is correct. Do not touch anything for now.
+    @scout look at how we validate tokens, and @forge run the auth tests.
+    Change nothing for now.
 
-  ▌ @sonar  research · 14:02  ◐ thinking · 0:18
-    ▸ shell · ls src/auth/                    ✓ 0.2s · output +1.4s
+  ▌ @scout  research · 14:02  ◐ thinking · 0:18
+    ▸ fs · lists src/auth/                    ✓ 0.2s
         jwt.py  legacy/  tokens.py  __init__.py
     ▸ fs · reads src/auth/jwt.py              ✓ 0.4s
     ┊ Comparing Two Validation Paths
@@ -29,14 +29,29 @@ refuses, or refuses and explains why.
     1-9 decide · r refuse with a reason · esc back to typing
 
 ◇ type while they work…▏
-◐@sonar  ◆@forge  ·@audit                     ^C interrupt · 0:18
+◐@scout  ◆@forge                              ^C interrupt · 0:18
 ```
 
 ## Install
 
 ```sh
-git clone <this repo> && cd quorum
-uv sync
+curl -fsSL https://raw.githubusercontent.com/HugiSimon/quorum/master/install.sh | sh
+```
+
+Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/HugiSimon/quorum/master/install.ps1 | iex
+```
+
+Nothing is compiled: the script installs [uv](https://docs.astral.sh/uv/) if it is missing,
+then quorum as a tool — its own isolated environment, a `quorum` command in `~/.local/bin`.
+To remove it: `uv tool uninstall quorum`.
+
+While the repository is private, the one-liner cannot read it. Install it directly instead:
+
+```sh
+uv tool install git+ssh://git@github.com/HugiSimon/quorum
 ```
 
 You need at least one agent that speaks **ACP** (Agent Client Protocol):
@@ -52,8 +67,21 @@ Quorum is tied to none of them: a bot simply declares the command to launch.
 ## Run
 
 ```sh
-uv run quorum          # home: resume a room, create one, manage the bots
-uv run quorum demo     # open a room directly
+cd ~/dev/my-project
+quorum                 # home: resume a room, create one, manage the bots
+quorum review          # open a room directly
+```
+
+**The bots work in the folder you launched it from.** Your rooms, bots and threads live in
+`~/.quorum` — one folder, editable by hand, moved with `QUORUM_HOME`:
+
+```
+~/.quorum/
+  bots/scout/…      a bot is a folder
+  rooms/review/…    a room is a folder, with its thread
+  runtime/          logs and separate copies — throwaway
+  settings.json     what the settings screen writes
+  .env              what is machine-specific, and nothing else
 ```
 
 **At home** — `↑↓` walk · `⏎` open · `n` new room · `b` new bot ·
@@ -67,10 +95,33 @@ uv run quorum demo     # open a room directly
 **In a bot card** — `⇥` next field · `^S` save · `esc` discard. In the permission table:
 `a` add · `e` edit the pattern · `d` change the decision · `x` remove · `⇧↑↓` reorder.
 
+## What comes with it
+
+Four bots, on `gemini --acp`, with the machine's personal MCP servers and extensions cut.
+Rename them, change their model, rewrite their permissions — they are yours from the first
+launch.
+
+| bot | it can | it cannot |
+|---|---|---|
+| `@scout` | read, search, cite, with exact paths | write anything, run anything |
+| `@forge` | `git`, `ls`, read the code | `push`, `reset`, `clean`, `rm`, `sudo` — those ask you |
+| `@critic` | read the code and argue against it, ranked by severity | write anything, run anything |
+| `@scribe` | write the README, the comment, the commit message | run a command |
+
+And two rooms:
+
+| room | members | what it is for |
+|---|---|---|
+| `review` | `@scout` `@critic` | reading a change apart: neither member can touch a file |
+| `pair` | `@forge` `@scout` | one changes, the other checks |
+
+A room whose `folder` is `.` — both of those — works wherever you launch quorum. Give it an
+absolute path and it stays pinned to one project; the room screen (`^O`) writes one for you.
+
 ## A bot is a folder
 
 ```
-bots/forge/
+~/.quorum/bots/forge/
   bot.toml       name, role, hue, command, model, capabilities
   system.md      its role — replaces the agent's system prompt
   policy.toml    its permissions — first matching rule wins
@@ -80,12 +131,12 @@ bots/forge/
 Everything is editable by hand; the card (`^B`) writes exactly those files.
 
 Whatever depends on the machine (company certificate, proxy) goes through the bot's `env`
-block as `${VARIABLE}`, resolved from an unversioned `.env`. See `.env.example`.
+block as `${VARIABLE}`, resolved from `~/.quorum/.env`. See `.env.example`.
 
 ## A room is a folder
 
 ```
-rooms/demo/
+~/.quorum/rooms/review/
   room.toml          members, work folder, chaining budget — written by a human
   transcript.jsonl   the thread, source of truth — not versioned
   state.json         sessions and read index per bot — written by the machine
@@ -115,9 +166,11 @@ These points come from trials against the real protocol, not from the documentat
 - **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
   titles; the body opens in the reasoning screen.
 
-## Verify
+## Working on quorum
 
 ```sh
+git clone https://github.com/HugiSimon/quorum && cd quorum
+QUORUM_HOME=$PWD/.home uv run quorum    # your own home, next to the code
 ./verify.sh
 ```
 

@@ -67,7 +67,7 @@ async def settings_scenario() -> None:
     """The settings are written, and what shows applies right away."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        os.environ["QUORUM_CONFIG"] = str(root / "config")
+        os.environ["QUORUM_HOME"] = str(root / "config")
         build_project(root, max_rounds=0)
         app = Quorum(load_room(root, "trial"), bots.load_all(root / "bots"))
         async with app.run_test(size=(110, 45)) as pilot:
@@ -95,14 +95,14 @@ async def settings_scenario() -> None:
 
         written = json.loads((root / "config" / "settings.json").read_text())
         assert written["thinking"] == "last line" and not written["ask_outside_folder"]
-        del os.environ["QUORUM_CONFIG"]
+        del os.environ["QUORUM_HOME"]
 
 
 async def guard_scenario() -> None:
     """A write outside the room folder does not get through without the user's decision."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        os.environ["QUORUM_CONFIG"] = str(root / "config")
+        os.environ["QUORUM_HOME"] = str(root / "config")
         build_project(root, max_rounds=0)
         outside = Path(tempfile.mkdtemp()) / "stolen.txt"
         app = Quorum(load_room(root, "trial"), bots.load_all(root / "bots"))
@@ -128,7 +128,7 @@ async def guard_scenario() -> None:
             await pilot.press("enter")
             await wait_for(pilot, lambda: one.turn.done() and inside.exists(), "the allowed write")
             assert inside.read_text().startswith("written by the agent")
-        del os.environ["QUORUM_CONFIG"]
+        del os.environ["QUORUM_HOME"]
 
 
 async def main() -> None:

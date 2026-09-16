@@ -1,0 +1,8 @@
+name = "critic"
+role = "review"
+hue = 20
+
+command = "gemini"
+args = ["--acp"]
+model = ""
+provider = "gemini"

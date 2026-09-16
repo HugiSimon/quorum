@@ -662,7 +662,7 @@ class SettingsScreen(Navigable):
         self.query_one("#providers", Static).update(text)
         self.query_one("#footer", Static).update(
             Text.assemble(self.standard_footer(),
-                          (f"  ·  {config.folder()}", N["faint"]))
+                          (f"  ·  {config.home()}", N["faint"]))
         )
         self.query(Step).first().focus()
 
@@ -718,7 +718,7 @@ class HomeScreen(Screen):
         self.reload()
 
     def reload(self) -> None:
-        self.rooms = room_summaries(self.app.root)
+        self.rooms = room_summaries(self.app.root, self.app.here)
         self.bots = bots.load_all(self.app.root / "bots")
         for section, length in (("rooms", len(self.rooms)), ("bots", len(self.bots))):
             self.cursor[section] = min(self.cursor[section], max(0, length - 1))
@@ -772,8 +772,13 @@ class HomeScreen(Screen):
             text.append(f"{room['name']:<22}", style=(f"bold {N['ink']}" if aimed else N["ink"]) + bg)
             text.append(f"{' '.join('@' + m for m in room['members'][:3]) or 'no member':<26}",
                         style=(N["dim"] if aimed else N["faint"]) + bg)
-            text.append(f"{room['messages']} messages · {room['when']}".ljust(30) + "\n",
-                        style=(N["dim"] if aimed else N["faint"]) + bg)
+            # The rooms are global, the folders are not: without this, two projects share a
+            # name and nothing says which one you are about to open.
+            text.append(
+                f"{room['folder'].name}/ · {room['messages']} messages · {room['when']}".ljust(34)
+                + "\n",
+                style=(N["dim"] if aimed else N["faint"]) + bg,
+            )
         if not self.rooms:
             text.append("    no room — ", style=N["dim"])
             text.append("n", style=CLICKABLE)
@@ -851,7 +856,7 @@ class HomeScreen(Screen):
         self.app.exit(None)
 
     def action_new_room(self) -> None:
-        empty = Room(name="new", folder=Path.cwd(), members=[],
+        empty = Room(name="new", folder=self.app.here, members=[],
                      root=self.app.root / "rooms" / "new")
         self.app.push_screen(RoomScreen(self.app.root, empty, self.bots),
                              lambda _: self.reload())
@@ -868,9 +873,11 @@ class HomeScreen(Screen):
 class Home(App):
     """The home application. Returns the name of the room to open, or nothing."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, here: Path | None = None) -> None:
         super().__init__()
         self.root = root
+        # Where the command was launched: a room whose folder is relative works there.
+        self.here = here or root
         self.settings = config.read()
         apply_theme(
             terminal_theme() if self.settings["theme"] == "follow terminal"

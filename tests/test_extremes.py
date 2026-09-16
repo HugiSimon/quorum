@@ -80,7 +80,7 @@ async def light_theme_scenario() -> None:
     """Same hue, other lightness: a bot's identity does not change color, only tone."""
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        os.environ["QUORUM_CONFIG"] = str(root / "config")
+        os.environ["QUORUM_HOME"] = str(root / "config")
         config.write({**config.DEFAULTS, "theme": "light"})
         app, context = await open_room(root, (120, 30))
         async with context as pilot:
@@ -98,7 +98,7 @@ async def light_theme_scenario() -> None:
             await pilot.pause(0.2)
             assert N["bg"] == NEUTRALS_DARK["bg"], N["bg"]
             assert app.participants["fake1"].color == bot_color(fake1.bot.hue, dark=True)
-        del os.environ["QUORUM_CONFIG"]
+        del os.environ["QUORUM_HOME"]
 
 
 async def main() -> None:

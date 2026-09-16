@@ -1,0 +1,5 @@
+{
+  "mcp": { "allowed": [] },
+  "hooks": {},
+  "general": { "previewFeatures": true }
+}

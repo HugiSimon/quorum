@@ -1,6 +1,0 @@
-name = "demo"
-folder = "."          # relative to the project root
-members = ["forge", "sonar"]
-
-max_rounds = 3         # 0 = the bots never answer each other
-stop_on_repeat = true

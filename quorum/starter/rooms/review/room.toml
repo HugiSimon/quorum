@@ -1,0 +1,7 @@
+# Read only by construction: neither member can change a file or run a command.
+name = "review"
+folder = "."           # relative: the folder you launched quorum from
+members = ["scout", "critic"]
+
+max_rounds = 2         # 0 = the bots never answer each other
+stop_on_repeat = true
