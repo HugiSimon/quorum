@@ -1,0 +1,13 @@
+nom = "forge"
+role = "exécution"
+teinte = 150
+
+commande = "gemini"
+args = ["--acp"]
+modele = ""          # vide : on laisse le défaut du fournisseur
+
+# Ce qui dépend de la machine passe par ici, jamais par le code.
+[env]
+NODE_EXTRA_CA_CERTS = "${NODE_EXTRA_CA_CERTS}"
+HTTPS_PROXY = "${HTTPS_PROXY}"
+NO_PROXY = "${NO_PROXY}"

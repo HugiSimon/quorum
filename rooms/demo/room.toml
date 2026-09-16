@@ -1,0 +1,6 @@
+nom = "demo"
+dossier = "."          # relatif à la racine du projet
+membres = ["forge", "sonar"]
+
+max_rounds = 3         # 0 = les bots ne se répondent jamais
+couper_si_repetition = true

@@ -1,0 +1,12 @@
+nom = "sonar"
+role = "recherche"
+teinte = 250
+
+commande = "gemini"
+args = ["--acp"]
+modele = ""
+
+[env]
+NODE_EXTRA_CA_CERTS = "${NODE_EXTRA_CA_CERTS}"
+HTTPS_PROXY = "${HTTPS_PROXY}"
+NO_PROXY = "${NO_PROXY}"
