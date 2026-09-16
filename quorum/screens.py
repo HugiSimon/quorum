@@ -773,10 +773,11 @@ class HomeScreen(Screen):
             text.append(f"{' '.join('@' + m for m in room['members'][:3]) or 'no member':<26}",
                         style=(N["dim"] if aimed else N["faint"]) + bg)
             # The rooms are global, the folders are not: without this, two projects share a
-            # name and nothing says which one you are about to open.
+            # name and nothing says which one you are about to open. A room that has never
+            # been opened has no folder yet — it takes the one you open it from.
+            where = f"{room['folder'].name}/" if room["pinned"] else "opens here"
             text.append(
-                f"{room['folder'].name}/ · {room['messages']} messages · {room['when']}".ljust(34)
-                + "\n",
+                f"{where} · {room['messages']} messages · {room['when']}".ljust(34) + "\n",
                 style=(N["dim"] if aimed else N["faint"]) + bg,
             )
         if not self.rooms:

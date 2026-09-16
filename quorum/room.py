@@ -11,7 +11,7 @@ import json
 import re
 import time
 import tomllib
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 MENTION_PATTERN = re.compile(r"@([A-Za-z0-9_-]+)")
@@ -70,6 +70,9 @@ class Room:
     # 0 = every member stays warm. Otherwise, a bot idle for that many minutes gives back
     # its live memory; its next turn wakes it up through session/load.
     evict_minutes: int = 0
+    # False while room.toml still says `folder = "."`: the room follows the terminal. It is
+    # pinned to a project the first time it is opened.
+    pinned: bool = True
 
 
 def load_room(project_root: Path, name: str, here: Path | None = None) -> Room:
@@ -82,7 +85,8 @@ def load_room(project_root: Path, name: str, here: Path | None = None) -> Room:
     root = project_root / "rooms" / name
     conf = tomllib.loads((root / "room.toml").read_text(encoding="utf-8"))
     folder = Path(conf.get("folder", ".")).expanduser()
-    if not folder.is_absolute():
+    pinned = folder.is_absolute()
+    if not pinned:
         folder = ((here or project_root) / folder).resolve()
     return Room(
         name=conf.get("name", name),
@@ -93,7 +97,25 @@ def load_room(project_root: Path, name: str, here: Path | None = None) -> Room:
         stop_on_repeat=bool(conf.get("stop_on_repeat", True)),
         keep_outputs=bool(conf.get("keep_outputs", True)),
         evict_minutes=int(conf.get("evict_minutes", 0)),
+        pinned=pinned,
     )
+
+
+def pin(room: Room) -> Room:
+    """Writes down the folder a room was opened in, so it stays there.
+
+    The rooms that ship with quorum say `folder = "."`: they follow the terminal until the
+    first time one is opened, and then they belong to that project. Without this, every
+    room on the home sheet claims to live in whatever folder you happen to be standing in.
+    """
+    if room.pinned:
+        return room
+    path = room.root / "room.toml"
+    text = path.read_text(encoding="utf-8")
+    line = f'folder = "{room.folder}"'
+    fixed, count = re.subn(r"(?m)^folder\s*=.*$", line.replace("\\", "\\\\"), text, count=1)
+    path.write_text(fixed if count else f"{text.rstrip()}\n{line}\n", encoding="utf-8")
+    return replace(room, pinned=True)
 
 
 def read_state(room: Room) -> dict:
@@ -172,6 +194,7 @@ def room_summaries(root: Path, here: Path | None = None) -> list[dict]:
             "name": room.name,
             "members": room.members,
             "folder": room.folder,
+            "pinned": room.pinned,
             "messages": messages,
             "when": ago(thread.stat().st_mtime) if thread.exists() else "never opened",
             "at": thread.stat().st_mtime if thread.exists() else 0.0,
@@ -217,10 +240,11 @@ def split_thought(text: str) -> tuple[str, list[tuple[str, str]]]:
 
 
 def roster(name: str, members: list[str]) -> str:
-    """Who is in the room, every turn.
+    """Who is in the room, and what a mention costs — every turn.
 
     A bot cannot see the room: left to itself it hands work to a name it remembers from its
-    own instructions, and that mention reaches nobody.
+    own instructions, and that mention reaches nobody. And an `@` written out of courtesy —
+    "good catch @critic" — wakes that bot for a turn it has nothing to add to.
     """
     others = [m for m in members if m != name]
     if not others:
@@ -229,7 +253,9 @@ def roster(name: str, members: list[str]) -> str:
         f"[room] you are @{name}. The others here: "
         + ", ".join(f"@{m}" for m in others)
         + ". Those are the only names that reach anyone — a mention of anybody else is read "
-        "by no one."
+        "by no one. Writing @name hands them the turn: use it only when you want an answer "
+        "from them. To agree with someone, or to credit them, write their name without the "
+        "@ — an @ spent on courtesy costs the room a whole round."
     )
 
 
@@ -277,6 +303,7 @@ if __name__ == "__main__":
     prompt = prompt_for("forge", entries, 0, members)
     assert "@sonar, @lex" in prompt and "@forge" in prompt, prompt
     assert "read by no one" in prompt, "a bot must know which names reach someone"
+    assert "hands them the turn" in prompt, "and what a mention costs"
     assert "alone with the user" in roster("forge", ["forge"])
     prompt = prompt_for("forge", entries, 0)
     assert "tests are green" not in prompt, "a bot does not re-read itself: its session has it"
@@ -325,6 +352,17 @@ if __name__ == "__main__":
         )
         assert load_room(home, "here", elsewhere).folder == home, \
             "an absolute folder pins the room, wherever it is opened"
+
+        (home / "rooms" / "here" / "room.toml").write_text(
+            '# a comment to keep\nname = "here"\nfolder = "."\nmembers = []\n', encoding="utf-8"
+        )
+        loose = load_room(home, "here", elsewhere)
+        assert not loose.pinned
+        assert pin(loose).pinned, "a room is pinned once, when it is first opened"
+        kept = (home / "rooms" / "here" / "room.toml").read_text()
+        assert "# a comment to keep" in kept and f'folder = "{elsewhere.resolve()}"' in kept, kept
+        assert load_room(home, "here", home).folder == elsewhere.resolve(), \
+            "opened from somewhere else, a pinned room does not move"
 
     summary = thread_summary(entries)
     assert "[room resume]" in summary and "3 messages" in summary, summary

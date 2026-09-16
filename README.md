@@ -110,8 +110,10 @@ And two rooms:
 | `review` | `@scout` `@critic` | reading a change apart: neither member can touch a file |
 | `pair` | `@forge` `@scout` | one changes, the other checks |
 
-A room whose `folder` is `.` — both of those — works wherever you launch quorum. Give it an
-absolute path and it stays pinned to one project; the room screen (`^O`) writes one for you.
+Both ship with `folder = "."`: they follow your terminal until the first time you open one,
+and then they settle in that project — the folder is written into `room.toml` and the room
+stays there. Home shows `opens here` for a room that has not been opened yet. To move one,
+change its folder in the room screen (`^O`); `n` creates a room in the folder you are in.
 
 ## A bot is a folder
 

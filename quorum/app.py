@@ -32,6 +32,7 @@ from .room import (
     Room,
     Transcript,
     load_room,
+    pin,
     recipients,
     fingerprint,
     prompt_for,
@@ -1564,7 +1565,8 @@ def main() -> None:
         if not path.exists():
             print(f"no room named « {name} » in {root / 'rooms'}")
             return
-        room = load_room(root, name, here)
+        # Opening a room settles where it lives: it stops following the terminal.
+        room = pin(load_room(root, name, here))
         Quorum(room, bots.load_all(root / "bots")).run()
 
 
