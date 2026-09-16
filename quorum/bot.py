@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import os
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from string import Template
 
@@ -37,6 +37,12 @@ PATTERNS = (
 # ponytail: `commandRegex` (shell only, gemini) has no pattern of its own; it would still
 # read as the catch-all. Give it one the day a policy uses it.
 GENERIC = ("tool:", {}, "toolName")
+
+# The engine requires a toolName on every rule; the catch-all says so with a wildcard.
+# Written without it, the file fails validation and *no rule at all* is loaded — the bot
+# then asks for everything, which reads like a working policy and is not one.
+CATCH_ALL = {"toolName": "*"}
+EVERYTHING = "everything else"
 
 DECISIONS = {
     "allow": ("✓ allowed", "always"),
@@ -158,7 +164,7 @@ def write_toml(tables: list[tuple[str, dict]], header: str = "") -> str:
 
 def rule_to_toml(rule: Rule, priority: int) -> dict:
     """Translates a bot-card pattern into fields the permission engine understands."""
-    fields: dict = {}
+    fields: dict = dict(CATCH_ALL) if rule.pattern == EVERYTHING else {}
     for prefix, fixed, free_field in PATTERNS + (GENERIC,):
         if not rule.pattern.startswith(prefix):
             continue
@@ -195,17 +201,20 @@ def toml_to_pattern(fields: dict) -> str:
             widest = f"{prefix}*"
     if widest:
         return widest
-    if fields.get(GENERIC[2]):
-        return f"{GENERIC[0]}{fields[GENERIC[2]]}"
-    return "everything else"
+    name = fields.get(GENERIC[2])
+    if name and name != CATCH_ALL["toolName"]:
+        return f"{GENERIC[0]}{name}"
+    return EVERYTHING
 
 
 def read_rules(folder: Path) -> list[Rule]:
     """A bot's rules, in decreasing priority order — the first one wins."""
     file = folder / "policy.toml"
     if not file.exists():
-        return [Rule("everything else", "ask_user")]
-    raw = tomllib.loads(file.read_text(encoding="utf-8")).get("rules", [])
+        return [Rule(EVERYTHING, "ask_user")]
+    conf = tomllib.loads(file.read_text(encoding="utf-8"))
+    # `rule` is what the engine reads; `rules` was ours, and it loaded nothing.
+    raw = conf.get("rule") or conf.get("rules") or []
     raw.sort(key=lambda r: -int(r.get("priority", 0)))
     return [Rule(toml_to_pattern(r), r.get("decision", "ask_user")) for r in raw]
 
@@ -251,7 +260,7 @@ def write_bot(folder: Path, bot: Bot, role: str, rules: list[Rule]) -> None:
 
     (folder / "policy.toml").write_text(
         write_toml(
-            [("[[rules]]", rule_to_toml(rule, 100 - index * 5))
+            [("[[rule]]", rule_to_toml(rule, 100 - index * 5))
              for index, rule in enumerate(rules)],
             header="first matching rule wins, decreasing priority",
         ),
@@ -286,6 +295,8 @@ def launch(
 
     args = list(bot.args)
     if bot.provider == "gemini":
+        # Absolute: the agent resolves these against its own cwd, which is the work folder.
+        bot = replace(bot, folder=bot.folder.resolve())
         if (bot.folder / "system.md").exists():
             env["GEMINI_SYSTEM_MD"] = str(bot.folder / "system.md")
         if (bot.folder / "settings.json").exists():

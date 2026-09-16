@@ -1,42 +1,43 @@
 # Writes, never runs. A write outside the room folder still comes up to the user.
 # First matching rule wins, decreasing priority.
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 decision = "deny"
 priority = 90
-denyMessage = "@scribe writes, it does not run — ask @forge"
+# refused with: @scribe writes, it does not run
 
-[[rules]]
+[[rule]]
 toolName = "write_file"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "replace"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "read_file"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "list_directory"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "search_file_content"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "glob"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
+toolName = "*"
 decision = "ask_user"
 priority = 1

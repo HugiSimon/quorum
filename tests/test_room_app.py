@@ -52,11 +52,26 @@ async def main() -> None:
                 "two permissions pending at the same time",
             )
             assert one.bubble is not two.bubble, "two streams, two blocks"
-            focus = [p.name for p in app.participants.values() if p.panel.has_focus]
-            assert len(focus) == 1, f"one panel decides at a time, not {focus}"
 
-            for participant in (one, two):
-                participant.panel.choose(participant.panel.options[0])
+            # One request on screen at a time: the second waits its turn instead of
+            # stacking under the first, where it could only be reached with ⇥.
+            mounted = [p.name for p in app.participants.values() if p.panel.is_mounted]
+            assert len(mounted) == 1, f"one panel on screen, not {mounted}"
+            live = next(p for p in (one, two) if p.panel.is_mounted)
+            queued = next(p for p in (one, two) if not p.panel.is_mounted)
+            assert live.panel.has_focus, "the request on screen holds the focus"
+            assert live.panel.queued == 1, live.panel.queued
+            assert "1 more waiting" in live.panel.render().plain
+
+            answered = live.panel          # the participant drops it once it is decided
+            answered.choose(answered.options[0])
+            await wait_for(pilot, lambda: queued.panel is not None and queued.panel.is_mounted,
+                           "the next request takes its place")
+            assert queued.panel.queued == 0 and queued.panel.has_focus
+            decided = answered.render().plain
+            assert decided.count("\n") == 1, f"an answered request is one line: {decided!r}"
+
+            queued.panel.choose(queued.panel.options[0])
             await wait_for(pilot, lambda: one.turn.done() and two.turn.done(), "both turns")
 
             assert "fake1" in one.bubble.body and "fake2" not in one.bubble.body, one.bubble.body

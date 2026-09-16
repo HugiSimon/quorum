@@ -54,7 +54,9 @@ def main() -> None:
 
         # And the permission engine does receive the file.
         _, args, _ = launch(back)
-        assert "--policy" in args and str(folder / "policy.toml") in args, args
+        # Absolute: the agent resolves what it is given against its own cwd, not ours.
+        assert "--policy" in args and str(folder.resolve() / "policy.toml") in args, args
+        assert all(Path(a).is_absolute() for a in args if a.endswith(".toml")), args
 
         # A rule the card cannot name used to be read as "everything else", and written back
         # as a rule with no criteria at all: opening a bot and saving it turned one allowed

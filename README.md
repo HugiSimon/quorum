@@ -16,12 +16,12 @@ refuses, or refuses and explains why.
     Change nothing for now.
 
   ▌ @scout  research · 14:02  ◐ thinking · 0:18
-    ▸ fs · lists src/auth/                    ✓ 0.2s
-        jwt.py  legacy/  tokens.py  __init__.py
+    ┊ 6 earlier tools
     ▸ fs · reads src/auth/jwt.py              ✓ 0.4s
+        def verify(token): …
     ┊ Comparing Two Validation Paths
 
-  ◆ @forge asks for permission                              ⇥ next request
+  ◆ @forge asks for permission                             · 1 more waiting
     rm -rf .venv && uv sync
     1 ✓  Allow
     2 ✓✓ Allow for this session
@@ -82,7 +82,8 @@ quorum review          # open a room directly
 `,` settings · `^Q` quit.
 
 **In a room** — `⏎` send · `1`…`9` decide a permission · `r` refuse with a reason ·
-`^C` interrupt the turn · `^R` watch the last active bot work · `^B` its card ·
+`^C` interrupt the turn · **click a block** to see how it was written ·
+`^R` watch the last active bot work · `^B` its card ·
 `^O` set up the room · `^G` settings · `end` follow the stream ·
 `^Q` back to home.
 
@@ -169,6 +170,10 @@ These points come from trials against the real protocol, not from the documentat
 - **The token count only exists at the end of a turn.** Nothing to show during it.
 - **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
   titles; the body opens in the reasoning screen.
+- **A policy file the engine cannot read is not an error.** `[[rules]]` instead of `[[rule]]`,
+  or a rule without `toolName`, and it loads nothing at all — every tool then asks, which
+  looks like a working policy and is not one. What is shipped is checked against the engine,
+  not against the documentation.
 
 ## Working on quorum
 

@@ -69,7 +69,9 @@ async def main() -> None:
             await wait_for(pilot, lambda: shell["output"] is not None, "the output from the log", 1500)
 
             assert shell["output"] == "        2 data.txt", repr(shell["output"])
-            assert "output +" in one.bubble.draw().plain
+            # The thread folds a finished turn; the output lives on the tool line, which is
+            # what the reasoning screen renders.
+            assert "output +" in one.bubble.tool_line(shell).plain
             assert one.outputs.path.exists(), "the log must stay on disk, not be wiped"
 
             # And an output that will never come is announced, not animated forever.
@@ -83,19 +85,34 @@ async def main() -> None:
             finally:
                 telemetry.GRACE = keep
             assert read["output_lost"] and not read["awaiting_output"], read
-            assert "output never came" in one.bubble.draw().plain
+            assert "output never came" in one.bubble.tool_line(read).plain
 
             # And if it does come in the end, the interface takes it back.
             app.tool_output(one, "call_7", "late content")
             assert not read["output_lost"] and read["output"] == "late content", read
-            assert "output never came" not in one.bubble.draw().plain
+            assert "output never came" not in one.bubble.tool_line(read).plain
 
-            # Once the turn is over, the thread keeps only the message and a quiet count.
+            # Once the turn is over, the thread keeps only the message and a quiet count:
+            # no step, no tool line, none of their output.
             one.bubble.state = "done"
             done = one.bubble.draw().plain
             assert "Reading The Sources" not in done, done
             assert "open the reasoning" not in done, done
-            assert "2 tools" in done, done
+            assert "2 data.txt" not in done, "a finished turn keeps no command output"
+            assert "2 tools" in done and "click to see how" in done, done
+
+            # And while it works, only the last few tools stay on screen.
+            one.bubble.state = "running"
+            for index in range(6):
+                one.bubble.tools.append({
+                    "id": f"x{index}", "family": "shell", "title": f"command {index}",
+                    "start": 0.0, "end": 1.0, "output": "noise", "awaiting_output": False,
+                    "output_lost": False,
+                })
+            live = one.bubble.draw().plain
+            assert "command 5" in live and "command 0" not in live, live
+            assert "5 earlier tools" in live, live
+            assert live.count("noise") == 1, "only the tool in flight shows its output"
     print("test_thinking: steps ok · files ok · S7 screen ok · late and lost output ok")
 
 

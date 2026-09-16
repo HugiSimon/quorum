@@ -58,6 +58,10 @@ from .theme import (
 
 LIVE = ("thinking", "running", "asking")
 
+# How many tool lines a working bot keeps on screen. The rest is one counter, and all of it
+# stays in the reasoning screen.
+TOOL_WINDOW = 3
+
 # Beyond that, we consider the memory lost rather than leaving the room shut.
 RESUME_TIMEOUT = 30.0
 
@@ -156,14 +160,22 @@ class Bubble(Static):
                 text.append(f" · {_duration(time.monotonic() - self.start)}", style=N["faint"])
         text.append("\n")
 
-        for tool in self.tools:
-            text.append_text(self.tool_line(tool))
+        # While it works, the last few tools — with the output of the current one only.
+        # Twenty-four tools at twelve lines of output each buried the answer.
+        done = self.state in ("done", "out", "failed")
+        if not done:
+            shown_tools = self.tools[-TOOL_WINDOW:]
+            hidden = len(self.tools) - len(shown_tools)
+            if hidden:
+                text.append(f"  ┊ {hidden} earlier tool{'s' if hidden > 1 else ''}\n",
+                            style=N["faint"])
+            for tool in shown_tools:
+                text.append_text(self.tool_line(tool, output=tool is self.tools[-1]))
 
         for line in self.body.rstrip().splitlines():
             text.append(f"    {line}\n", style=N["ink"])
 
         # While it works we show the steps; once the message is written, it stands alone.
-        done = self.state in ("done", "out", "failed")
         if self.thinking_visible and self.steps and not done and not self.compact:
             shown = (
                 self.steps if self.thinking == "unfolded"
@@ -174,14 +186,24 @@ class Bubble(Static):
                 text.append("  ┊ ", style=self.color)
                 text.append(f"{step['title']}\n", style=N["dim"])
 
+        # Done: the work folds into one line. The whole of it is one click away.
         if done and self.thinking_visible and (self.steps or self.tools):
-            count = f"{len(self.tools)} tools"
+            count = f"{len(self.tools)} tool{'s' if len(self.tools) != 1 else ''}"
             if self.steps:
-                count += f" · {len(self.steps)} steps"
-            text.append(f"    ┊ {count}\n", style=N["faint"])
+                count += f" · {len(self.steps)} step{'s' if len(self.steps) != 1 else ''}"
+            text.append(f"    ┊ {count}", style=N["faint"])
+            if self.owner:
+                text.append("  click to see how\n", style=CLICKABLE)
+            else:
+                text.append("\n", style=N["faint"])
         return text
 
-    def tool_line(self, tool: dict) -> Text:
+    def on_click(self) -> None:
+        """Clicking a bot's block opens its reasoning — the tools, their output, the steps."""
+        if self.owner:
+            self.app.open_thinking(self.owner, self)
+
+    def tool_line(self, tool: dict, output: bool = True) -> Text:
         """A tool line: family · title · duration, and the fate of its output.
 
         The output does not arrive with the end of the tool: one or two seconds later,
@@ -198,6 +220,9 @@ class Bubble(Static):
             return text
 
         text.append(f"  ✓ {tool['end'] - tool['start']:.1f}s", style=N["faint"])
+        if not output:
+            text.append("\n")
+            return text
         if tool.get("output") is not None:
             late = tool.get("arrival", tool["end"]) - tool["end"]
             text.append(f" · output +{late:.1f}s\n", style=N["faint"])
@@ -249,26 +274,38 @@ class PermissionPanel(Static):
         self.call = params.get("toolCall", {})
         self.answer = answer
         self.decision: str | None = None
+        # How many requests are behind this one — they come up here, one after the other.
+        self.queued = 0
         self.phase = 0
 
     def on_mount(self) -> None:
         self.redraw()
 
     def redraw(self) -> None:
+        if not self.is_mounted:   # still in the queue: nothing to paint yet
+            return
         blink = "◆" if self.decision or self.phase % 2 == 0 else " "
         text = Text()
+        title = self.call.get("title") or self.call.get("toolCallId", "")
+
+        if self.decision:
+            # Answered: one line of record, so the next request is never buried under it.
+            text.append("  ◇ ", style=N["faint"])
+            text.append(f"@{self.participant.name}", style=self.participant.color)
+            text.append(f" · {title} → {self.decision}\n", style=N["dim"])
+            self.update(text)
+            return
+
         text.append(f"  {blink} ", style=ATTENTION)
         text.append(f"@{self.participant.name}", style=f"bold {self.participant.color}")
         text.append(" asks for permission", style=ATTENTION)
+        if self.queued:
+            text.append(f"   · {self.queued} more waiting", style=N["dim"])
         text.append("\n", style=N["faint"])
-
-        title = self.call.get("title") or self.call.get("toolCallId", "")
         if title:
             text.append(f"    {title}\n", style=N["ink"])
 
-        if self.decision:
-            text.append(f"    → {self.decision}\n", style=N["dim"])
-        elif self.app.compact:
+        if self.app.compact:
             text.append("    ")
             for i, option in enumerate(self.options, 1):
                 kind = str(option.get("kind", ""))
@@ -291,14 +328,14 @@ class PermissionPanel(Static):
             text.append("decide   ", style=N["dim"])
             text.append("r ", style=CLICKABLE)
             text.append("refuse with a reason   ", style=N["dim"])
-            text.append("⇥ ", style=CLICKABLE)
-            text.append("next request   ", style=N["dim"])
             text.append("esc ", style=CLICKABLE)
             text.append("back to typing\n", style=N["dim"])
         self.update(text)
 
     def give_back_input(self) -> None:
         """Hands the focus back to the input, if it is still there."""
+        if not self.is_mounted:
+            return
         inputs = self.screen.query("#message")
         if inputs:
             inputs.first(Input).focus()
@@ -489,9 +526,12 @@ class ThinkingScreen(Screen):
         Binding("tab", "next", "next reasoning", priority=True),
     ]
 
-    def __init__(self, bot_name: str) -> None:
+    def __init__(self, bot_name: str, bubble: "Bubble | None" = None) -> None:
         super().__init__()
         self.bot_name = bot_name
+        # The block that was clicked, when it was: an old turn opens on its own work, not on
+        # whatever the bot is doing now.
+        self.bubble = bubble
         self.last_render = Text()
 
     def compose(self) -> ComposeResult:
@@ -514,7 +554,7 @@ class ThinkingScreen(Screen):
 
     def redraw(self) -> None:
         participant = self.app.participants[self.bot_name]
-        bubble = participant.bubble
+        bubble = self.bubble or participant.bubble
         width = max(40, self.size.width - 4)
         text = Text()
 
@@ -647,6 +687,8 @@ class Quorum(App):
         }
         self.missing = [name for name in room.members if name not in known_bots]
         self.unread = 0
+        # Permission requests wait their turn: one panel on screen at a time.
+        self.waiting: list[PermissionPanel] = []
         self.turn_start = 0.0
         self.conversation: asyncio.Task | None = None
         self.interrupted = False
@@ -1143,10 +1185,11 @@ class Quorum(App):
         write_file(params)
 
     async def ask_permission(self, participant: Participant, params: dict) -> dict:
-        """Mounts the panel and waits for the decision — as long as it takes.
+        """Queues the request and waits for the decision — as long as it takes.
 
-        At most one pending request per bot; several bots may each have one. The panel only
-        takes the focus if no other one is being decided.
+        One panel at a time, always the same place: the one being decided is the last thing
+        in the thread. Two bots asking at once used to stack two live panels, and the second
+        one could only be reached with ⇥.
         """
         participant.state = "asking"
         if participant.bubble is not None:
@@ -1155,15 +1198,31 @@ class Quorum(App):
         answer = asyncio.get_running_loop().create_future()
         panel = PermissionPanel(participant, params, answer)
         participant.panel = panel
-        await self.add(panel)
-        if not any(
-            p.panel is not None and p.panel.has_focus for p in self.participants.values()
-        ):
-            panel.focus()
+        self.waiting.append(panel)
+        await self.show_next_request()
         try:
             return await answer
         finally:
             participant.panel = None
+            if panel in self.waiting:
+                self.waiting.remove(panel)
+            # A worker, not an await: ^C cancels this very task, and the request behind it
+            # would never come up.
+            self.run_worker(self.show_next_request(), exclusive=False)
+
+    async def show_next_request(self) -> None:
+        """Mounts the oldest request still undecided, once the one before it is answered."""
+        for panel in self.waiting:
+            if panel.decision is not None:
+                continue
+            if not panel.is_mounted:
+                await self.add(panel)
+                panel.focus()
+            panel.queued = sum(
+                1 for other in self.waiting if other is not panel and other.decision is None
+            )
+            panel.redraw()
+            return
 
     # ── turns ───────────────────────────────────────────────────────────────────────
 
@@ -1288,7 +1347,9 @@ class Quorum(App):
         if not await self.ensure_ready(participant):
             await self.fail(participant, "could not be relaunched")
             return
-        text = forced or prompt_for(participant.name, self.transcript.entries, participant.seen)
+        text = forced or prompt_for(
+            participant.name, self.transcript.entries, participant.seen, self.room.members
+        )
         while True:
             participant.seen = len(self.transcript.entries)
             bubble = participant.bubble
@@ -1379,9 +1440,9 @@ class Quorum(App):
                 "system", "you", "turn interrupted · " + ", ".join(f"@{n}" for n in cut)
             )
 
-    def open_thinking(self, name: str | None) -> None:
+    def open_thinking(self, name: str | None, bubble: Bubble | None = None) -> None:
         if name in self.participants and self.participants[name].bot.thinking_visible:
-            self.push_screen(ThinkingScreen(name))
+            self.push_screen(ThinkingScreen(name, bubble))
 
     def known_models(self) -> list[str]:
         """The model list comes from the open sessions — never from a hard-coded name."""

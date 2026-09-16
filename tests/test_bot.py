@@ -33,6 +33,7 @@ def main() -> None:
         (Path(tmp) / ".env").write_text("PROJECT_CA=/tmp/ca.pem\n", encoding="utf-8")
 
         os.environ.pop("HTTPS_PROXY", None)
+        os.environ.pop("GEMINI_SYSTEM_MD", None)
         bot = load(folder)
         command, args, env = launch(bot, read_env(Path(tmp) / ".env"))
 

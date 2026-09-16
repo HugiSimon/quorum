@@ -1,70 +1,71 @@
 # First matching rule wins, decreasing priority.
 # What is allowed reads or inspects; anything that leaves a trace comes up to the user.
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 commandPrefix = "rm"
 decision = "ask_user"
 priority = 95
-denyMessage = "deletion: I always ask"
+# refused with: deletion: I always ask
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 commandPrefix = "sudo"
 decision = "ask_user"
 priority = 95
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 argsPattern = "push"
 decision = "ask_user"
 priority = 95
-denyMessage = "pushing is yours to decide"
+# refused with: pushing is yours to decide
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 argsPattern = "reset"
 decision = "ask_user"
 priority = 95
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 argsPattern = "clean"
 decision = "ask_user"
 priority = 95
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 commandPrefix = "git"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "run_shell_command"
 commandPrefix = "ls"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "read_file"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "list_directory"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "search_file_content"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
 toolName = "glob"
 decision = "allow"
 priority = 50
 
-[[rules]]
+[[rule]]
+toolName = "*"
 decision = "ask_user"
 priority = 1

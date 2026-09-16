@@ -216,7 +216,24 @@ def split_thought(text: str) -> tuple[str, list[tuple[str, str]]]:
     return parts[0].strip(), steps
 
 
-def prompt_for(name: str, entries: list[Entry], since: int) -> str:
+def roster(name: str, members: list[str]) -> str:
+    """Who is in the room, every turn.
+
+    A bot cannot see the room: left to itself it hands work to a name it remembers from its
+    own instructions, and that mention reaches nobody.
+    """
+    others = [m for m in members if m != name]
+    if not others:
+        return f"[room] you are @{name}, alone with the user. No one else can be called out."
+    return (
+        f"[room] you are @{name}. The others here: "
+        + ", ".join(f"@{m}" for m in others)
+        + ". Those are the only names that reach anyone — a mention of anybody else is read "
+        "by no one."
+    )
+
+
+def prompt_for(name: str, entries: list[Entry], since: int, members: list[str] = ()) -> str:
     """Builds a bot's prompt: only what it has not seen, and nothing of its own voice.
 
     The other bots' messages are framed as **data**: they describe what was said, they do
@@ -229,7 +246,7 @@ def prompt_for(name: str, entries: list[Entry], since: int) -> str:
     others = [e for e in window if e.kind != "user"]
     humans = [e for e in window if e.kind == "user"]
 
-    parts: list[str] = []
+    parts: list[str] = [roster(name, list(members))] if members else []
     if omitted:
         parts.append(f"[{omitted} older messages of the thread are not repeated here]")
     if others:
@@ -257,6 +274,10 @@ if __name__ == "__main__":
         Entry(1, "bot", "forge", "tests are green"),
         Entry(2, "bot", "sonar", "I see two validation paths"),
     ]
+    prompt = prompt_for("forge", entries, 0, members)
+    assert "@sonar, @lex" in prompt and "@forge" in prompt, prompt
+    assert "read by no one" in prompt, "a bot must know which names reach someone"
+    assert "alone with the user" in roster("forge", ["forge"])
     prompt = prompt_for("forge", entries, 0)
     assert "tests are green" not in prompt, "a bot does not re-read itself: its session has it"
     assert "DATA" in prompt and "sonar" in prompt
