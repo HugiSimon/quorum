@@ -1,11 +1,11 @@
-# Première règle qui gagne, priorité décroissante.
+# First matching rule wins, decreasing priority.
 
 [[rules]]
 toolName = "run_shell_command"
 argsPattern = "rm "
 decision = "ask_user"
 priority = 90
-denyMessage = "suppression : je demande, toujours"
+denyMessage = "deletion: I always ask"
 
 [[rules]]
 toolName = "run_shell_command"

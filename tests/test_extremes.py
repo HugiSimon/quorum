@@ -1,4 +1,4 @@
-"""S13 : 80×24, 200 colonnes, et le thème clair. Rien n'est retiré, tout est raccourci."""
+"""S13: 80×24, 200 columns, and the light theme. Nothing is removed, everything shortened."""
 
 import asyncio
 import os
@@ -11,101 +11,101 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from textual.widgets import Input, Static  # noqa: E402
 
-from atelier import attendre, monter_projet, saisie_prete  # noqa: E402
+from workshop import wait_for, build_project, input_ready  # noqa: E402
 from quorum import bot as bots  # noqa: E402
-from quorum import reglages as config  # noqa: E402
+from quorum import settings as config  # noqa: E402
 from quorum.app import Quorum  # noqa: E402
-from quorum.room import charger_salle  # noqa: E402
-from quorum.theme import N, NEUTRES_CLAIR, NEUTRES_SOMBRE, couleur_bot  # noqa: E402
+from quorum.room import load_room  # noqa: E402
+from quorum.theme import N, NEUTRALS_LIGHT, NEUTRALS_DARK, bot_color  # noqa: E402
 
 
-async def ouvrir(racine: Path, taille):
-    monter_projet(racine, max_rounds=0)
-    app = Quorum(charger_salle(racine, "essai"), bots.charger_tous(racine / "bots"))
-    return app, app.run_test(size=taille)
+async def open_room(root: Path, size):
+    build_project(root, max_rounds=0)
+    app = Quorum(load_room(root, "trial"), bots.load_all(root / "bots"))
+    return app, app.run_test(size=size)
 
 
-async def scenario_exigu() -> None:
-    """80×24 : le rôle disparaît, l'heure passe en relatif, les choix se réduisent au verbe."""
+async def cramped_scenario() -> None:
+    """80×24: the role goes, the time goes relative, the choices shrink to the verb."""
     with tempfile.TemporaryDirectory() as tmp:
-        racine = Path(tmp)
-        app, contexte = await ouvrir(racine, (80, 24))
-        async with contexte as pilot:
-            un = app.participants["faux1"]
-            await attendre(pilot, lambda: un.pret, "la session")
-            await saisie_prete(pilot, app)
-            assert app.compacte, app.size.width
+        root = Path(tmp)
+        app, context = await open_room(root, (80, 24))
+        async with context as pilot:
+            one = app.participants["fake1"]
+            await wait_for(pilot, lambda: one.ready, "the session")
+            await input_ready(pilot, app)
+            assert app.compact, app.size.width
 
-            app.query_one("#message", Input).value = "@faux1 PERM supprime .venv"
+            app.query_one("#message", Input).value = "@fake1 PERM delete .venv"
             await pilot.press("enter")
-            await attendre(pilot, lambda: un.panneau is not None, "l'autorisation")
+            await wait_for(pilot, lambda: one.panel is not None, "the permission")
             await pilot.pause(0.25)
 
-            rendu = un.bulle.rendu().plain
-            assert un.bulle.compacte, "la bulle doit se raccourcir"
-            assert "essai" not in rendu, f"le rôle doit disparaître : {rendu}"
-            assert "maintenant" in rendu, f"horodatage relatif attendu : {rendu}"
-            assert "@faux1" in rendu, "le nom, lui, ne part jamais"
+            rendered = one.bubble.draw().plain
+            assert one.bubble.compact, "the bubble must shorten"
+            assert "trial" not in rendered, f"the role must disappear: {rendered}"
+            assert "now" in rendered, f"relative timestamp expected: {rendered}"
+            assert "@fake1" in rendered, "the name, on the other hand, never goes"
 
-            choix = un.panneau.render().plain
-            assert "1 ✓allow" in choix and "3 ✕reject" in choix, choix
-            assert "r commenter" in choix, choix
-            assert choix.count("\n") <= 3, f"tout doit tenir serré : {choix!r}"
+            choices = one.panel.render().plain
+            assert "1 ✓allow" in choices and "3 ✕reject" in choices, choices
+            assert "r comment" in choices, choices
+            assert choices.count("\n") <= 3, f"everything must fit tight: {choices!r}"
 
-            assert not app.query_one("#cote", Static).display, "pas de marge à 80 colonnes"
-            un.panneau.choisir(un.panneau.options[0])
-            await attendre(pilot, lambda: un.tour.done(), "la fin du tour")
+            assert not app.query_one("#side", Static).display, "no margin at 80 columns"
+            one.panel.choose(one.panel.options[0])
+            await wait_for(pilot, lambda: one.turn.done(), "the end of the turn")
 
 
-async def scenario_immense() -> None:
-    """200 colonnes : les marges deviennent utiles, le fil ne s'étale pas."""
+async def huge_scenario() -> None:
+    """200 columns: the margins become useful, the thread does not sprawl."""
     with tempfile.TemporaryDirectory() as tmp:
-        racine = Path(tmp)
-        app, contexte = await ouvrir(racine, (200, 48))
-        async with contexte as pilot:
-            un = app.participants["faux1"]
-            await attendre(pilot, lambda: un.pret, "la session")
-            await saisie_prete(pilot, app)
+        root = Path(tmp)
+        app, context = await open_room(root, (200, 48))
+        async with context as pilot:
+            one = app.participants["fake1"]
+            await wait_for(pilot, lambda: one.ready, "the session")
+            await input_ready(pilot, app)
             await pilot.pause(0.3)
-            assert not app.compacte
+            assert not app.compact
 
-            cote = app.query_one("#cote", Static)
-            assert cote.display, "au-delà de 160 colonnes, le panneau latéral s'ouvre"
-            texte = cote.render().plain
-            assert "DANS CETTE SALLE" in texte and "@faux1" in texte and "@faux2" in texte, texte
-            assert "personne ne travaille" in texte, texte
+            side = app.query_one("#side", Static)
+            assert side.display, "beyond 160 columns, the side panel opens"
+            text = side.render().plain
+            assert "IN THIS ROOM" in text and "@fake1" in text and "@fake2" in text, text
+            assert "nobody is working" in text, text
 
 
-async def scenario_theme_clair() -> None:
-    """Même teinte, autre clarté : l'identité du bot ne change pas de couleur, juste de ton."""
+async def light_theme_scenario() -> None:
+    """Same hue, other lightness: a bot's identity does not change color, only tone."""
     with tempfile.TemporaryDirectory() as tmp:
-        racine = Path(tmp)
-        os.environ["QUORUM_CONFIG"] = str(racine / "config")
-        config.ecrire({**config.DEFAUTS, "theme": "clair"})
-        app, contexte = await ouvrir(racine, (120, 30))
-        async with contexte as pilot:
-            await attendre(pilot, lambda: all(p.pret for p in app.participants.values()), "sessions")
-            await saisie_prete(pilot, app)
-            assert N["fond"] == NEUTRES_CLAIR["fond"], N["fond"]
-            assert app.get_css_variables()["encre"] == NEUTRES_CLAIR["encre"]
+        root = Path(tmp)
+        os.environ["QUORUM_CONFIG"] = str(root / "config")
+        config.write({**config.DEFAULTS, "theme": "light"})
+        app, context = await open_room(root, (120, 30))
+        async with context as pilot:
+            await wait_for(pilot, lambda: all(p.ready for p in app.participants.values()), "sessions")
+            await input_ready(pilot, app)
+            assert N["bg"] == NEUTRALS_LIGHT["bg"], N["bg"]
+            assert app.get_css_variables()["ink"] == NEUTRALS_LIGHT["ink"]
 
-            faux1 = app.participants["faux1"]
-            assert faux1.couleur == couleur_bot(faux1.bot.teinte, sombre=False)
-            assert faux1.couleur != couleur_bot(faux1.bot.teinte, sombre=True)
+            fake1 = app.participants["fake1"]
+            assert fake1.color == bot_color(fake1.bot.hue, dark=False)
+            assert fake1.color != bot_color(fake1.bot.hue, dark=True)
 
-            # Et on rebascule à chaud, sans redémarrer.
-            app.reglages_changes({**app.reglages, "theme": "sombre"})
+            # And we switch back live, without restarting.
+            app.settings_changed({**app.settings, "theme": "dark"})
             await pilot.pause(0.2)
-            assert N["fond"] == NEUTRES_SOMBRE["fond"], N["fond"]
-            assert app.participants["faux1"].couleur == couleur_bot(faux1.bot.teinte, sombre=True)
+            assert N["bg"] == NEUTRALS_DARK["bg"], N["bg"]
+            assert app.participants["fake1"].color == bot_color(fake1.bot.hue, dark=True)
         del os.environ["QUORUM_CONFIG"]
 
 
 async def main() -> None:
-    await scenario_exigu()
-    await scenario_immense()
-    await scenario_theme_clair()
-    print("test_extremes : 80×24 ok · 200 colonnes ok · thème clair et bascule à chaud ok")
+    await cramped_scenario()
+    await huge_scenario()
+    await light_theme_scenario()
+    print("test_extremes: 80×24 ok · 200 columns ok · light theme and live switch ok")
 
 
 if __name__ == "__main__":

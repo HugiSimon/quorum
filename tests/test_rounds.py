@@ -1,4 +1,4 @@
-"""Les rounds bornés, le refus commenté et la coupure sur radotage."""
+"""Bounded rounds, the commented refusal and the cut on repetition."""
 
 import asyncio
 import sys
@@ -10,135 +10,135 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from textual.widgets import Input  # noqa: E402
 
-from atelier import attendre, monter_projet, saisie_prete  # noqa: E402
+from workshop import wait_for, build_project, input_ready  # noqa: E402
 from quorum import bot as bots  # noqa: E402
 from quorum.app import Quorum  # noqa: E402
-from quorum.room import Transcript, charger_salle  # noqa: E402
+from quorum.room import Transcript, load_room  # noqa: E402
 
 
-def lignes_du_fil(app) -> str:
-    return "\n".join(getattr(bloc, "texte_brut", "") for bloc in app.query("#fil > Static"))
+def thread_lines(app) -> str:
+    return "\n".join(getattr(block, "plain_text", "") for block in app.query("#thread > Static"))
 
 
-async def ouvrir(racine: Path, max_rounds: int, relais: bool):
-    monter_projet(racine, max_rounds=max_rounds, relais=relais)
-    salle = charger_salle(racine, "essai")
-    return Quorum(salle, bots.charger_tous(racine / "bots")), salle
+async def open_room(root: Path, max_rounds: int, relay: bool):
+    build_project(root, max_rounds=max_rounds, relay=relay)
+    room = load_room(root, "trial")
+    return Quorum(room, bots.load_all(root / "bots")), room
 
 
-async def scenario_budget() -> None:
-    """Un bot en interpelle un autre : round suivant, puis le budget rend la main."""
+async def budget_scenario() -> None:
+    """One bot calls another out: next round, then the budget hands back control."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, salle = await ouvrir(Path(tmp), max_rounds=1, relais=True)
+        app, room = await open_room(Path(tmp), max_rounds=1, relay=True)
         async with app.run_test() as pilot:
-            un, deux = app.participants["faux1"], app.participants["faux2"]
-            await attendre(pilot, lambda: un.pret and deux.pret, "les sessions")
-            await saisie_prete(pilot, app)
+            one, two = app.participants["fake1"], app.participants["fake2"]
+            await wait_for(pilot, lambda: one.ready and two.ready, "the sessions")
+            await input_ready(pilot, app)
 
-            app.query_one("#message", Input).value = "@faux1 RELANCE le débat"
+            app.query_one("#message", Input).value = "@fake1 RELAY the debate"
             await pilot.press("enter")
-            await attendre(pilot, lambda: app.conversation.done(), "la conversation s'arrête", 1500)
+            await wait_for(pilot, lambda: app.conversation.done(), "the conversation stops", 1500)
 
-            fil = lignes_du_fil(app)
-            assert "round 2 · @faux2" in fil, fil
-            assert "budget d'enchaînement épuisé (1)" in fil, fil
-            auteurs = [e.auteur for e in Transcript(salle.racine / "transcript.jsonl").entrees]
-            assert auteurs == ["toi", "faux1", "faux2"], auteurs
+            thread = thread_lines(app)
+            assert "round 2 · @fake2" in thread, thread
+            assert "chaining budget spent (1)" in thread, thread
+            authors = [e.author for e in Transcript(room.root / "transcript.jsonl").entries]
+            assert authors == ["you", "fake1", "fake2"], authors
 
 
-async def scenario_radotage() -> None:
-    """Un bot qui se répète coupe le round, même si le budget reste ouvert."""
+async def repetition_scenario() -> None:
+    """A bot that repeats itself cuts the round, even if the budget is still open."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, _ = await ouvrir(Path(tmp), max_rounds=6, relais=True)
+        app, _ = await open_room(Path(tmp), max_rounds=6, relay=True)
         async with app.run_test() as pilot:
-            un, deux = app.participants["faux1"], app.participants["faux2"]
-            await attendre(pilot, lambda: un.pret and deux.pret, "les sessions")
-            await saisie_prete(pilot, app)
+            one, two = app.participants["fake1"], app.participants["fake2"]
+            await wait_for(pilot, lambda: one.ready and two.ready, "the sessions")
+            await input_ready(pilot, app)
 
-            app.query_one("#message", Input).value = "@faux1 RELANCE le débat"
+            app.query_one("#message", Input).value = "@fake1 RELAY the debate"
             await pilot.press("enter")
-            await attendre(pilot, lambda: app.conversation.done(), "la conversation s'arrête", 2000)
+            await wait_for(pilot, lambda: app.conversation.done(), "the conversation stops", 2000)
 
-            fil = lignes_du_fil(app)
-            assert "se répète — round coupé" in fil, fil
-            assert "round 3" in fil and "round 6" not in fil, fil
-            assert un.radote, un.empreintes
+            thread = thread_lines(app)
+            assert "repeats itself — round cut" in thread, thread
+            assert "round 3" in thread and "round 6" not in thread, thread
+            assert one.repeats, one.fingerprints
 
 
-async def scenario_refus_commente() -> None:
-    """Un refus n'arrête pas le tour : il devient une consigne, et le fil le garde."""
+async def commented_refusal_scenario() -> None:
+    """A refusal does not stop the turn: it becomes an instruction, and the thread keeps it."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, salle = await ouvrir(Path(tmp), max_rounds=0, relais=False)
+        app, room = await open_room(Path(tmp), max_rounds=0, relay=False)
         async with app.run_test() as pilot:
-            un = app.participants["faux1"]
-            await attendre(pilot, lambda: un.pret, "la session")
-            await saisie_prete(pilot, app)
+            one = app.participants["fake1"]
+            await wait_for(pilot, lambda: one.ready, "the session")
+            await input_ready(pilot, app)
 
-            app.query_one("#message", Input).value = "@faux1 PERM supprime .venv"
+            app.query_one("#message", Input).value = "@fake1 PERM delete .venv"
             await pilot.press("enter")
-            await attendre(pilot, lambda: un.panneau is not None, "l'autorisation")
-            premiere = un.bulle
+            await wait_for(pilot, lambda: one.panel is not None, "the permission")
+            first = one.bubble
 
-            un.panneau.focus()
+            one.panel.focus()
             await pilot.press("r")
-            await attendre(pilot, lambda: bool(app.query("#refus")), "la zone de commentaire")
-            app.query_one("#refus", Input).value = "ne supprime pas .venv, il est compilé à la main"
+            await wait_for(pilot, lambda: bool(app.query("#refusal")), "the comment box")
+            app.query_one("#refusal", Input).value = "do not delete .venv, it is built by hand"
             await pilot.press("enter")
 
-            await attendre(pilot, lambda: un.bulle is not premiere, "le rebond du bot", 1500)
-            await attendre(pilot, lambda: un.tour.done(), "la fin du tour", 1500)
+            await wait_for(pilot, lambda: one.bubble is not first, "the bot's bounce", 1500)
+            await wait_for(pilot, lambda: one.turn.done(), "the end of the turn", 1500)
 
-            assert "propose" in un.bulle.corps, un.bulle.corps
-            assert "« ne supprime pas .venv" in lignes_du_fil(app)
+            assert "suggest" in one.bubble.body, one.bubble.body
+            assert "« do not delete .venv" in thread_lines(app)
 
-            entrees = Transcript(salle.racine / "transcript.jsonl").entrees
-            genres = [(e.genre, e.auteur) for e in entrees]
-            assert ("refus", "toi") in genres, genres
-            assert genres[-1] == ("bot", "faux1"), genres
-            # Le commentaire doit être lisible par les autres bots, donc dans le fil.
-            assert any("compilé à la main" in e.texte for e in entrees if e.genre == "refus")
+            entries = Transcript(room.root / "transcript.jsonl").entries
+            kinds = [(e.kind, e.author) for e in entries]
+            assert ("refusal", "you") in kinds, kinds
+            assert kinds[-1] == ("bot", "fake1"), kinds
+            # The comment must be readable by the other bots, so it belongs in the thread.
+            assert any("built by hand" in e.text for e in entries if e.kind == "refusal")
 
 
-async def scenario_interruption() -> None:
-    """^C referme les blocs, garde ce qui a été dit, et coupe l'enchaînement."""
+async def interruption_scenario() -> None:
+    """^C closes the blocks, keeps what was said, and cuts the chaining."""
     with tempfile.TemporaryDirectory() as tmp:
-        app, salle = await ouvrir(Path(tmp), max_rounds=5, relais=True)
+        app, room = await open_room(Path(tmp), max_rounds=5, relay=True)
         async with app.run_test() as pilot:
-            un = app.participants["faux1"]
-            await attendre(pilot, lambda: un.pret, "la session")
-            await saisie_prete(pilot, app)
+            one = app.participants["fake1"]
+            await wait_for(pilot, lambda: one.ready, "the session")
+            await input_ready(pilot, app)
 
-            app.query_one("#message", Input).value = "@faux1 PERM supprime .venv"
+            app.query_one("#message", Input).value = "@fake1 PERM delete .venv"
             await pilot.press("enter")
-            await attendre(pilot, lambda: un.panneau is not None, "l'autorisation en vol")
+            await wait_for(pilot, lambda: one.panel is not None, "the in-flight permission")
 
-            app.action_interrompre()
-            await attendre(pilot, lambda: un.tour.done(), "la fin du tour interrompu", 1500)
+            app.action_interrupt()
+            await wait_for(pilot, lambda: one.turn.done(), "the end of the interrupted turn", 1500)
 
-            # Le bloc se referme : il n'anime pas indéfiniment.
-            assert un.etat == "horsjeu" and un.bulle.etat == "horsjeu", un.etat
-            assert un.panneau is None or un.panneau.decision == "annulée"
-            assert app.interrompu is True
-            await attendre(pilot, lambda: app.conversation.done(), "l'enchaînement coupé", 1500)
+            # The block closes: it does not animate forever.
+            assert one.state == "out" and one.bubble.state == "out", one.state
+            assert one.panel is None or one.panel.decision == "cancelled"
+            assert app.interrupted is True
+            await wait_for(pilot, lambda: app.conversation.done(), "the chaining cut", 1500)
 
-            genres = [(e.genre, e.auteur) for e in Transcript(salle.racine / "transcript.jsonl").entrees]
-            assert ("systeme", "toi") in genres, genres
-            # Et le tour suivant repart normalement.
-            ancienne = app.conversation
-            app.query_one("#message", Input).value = "@faux1 et maintenant ?"
+            kinds = [(e.kind, e.author) for e in Transcript(room.root / "transcript.jsonl").entries]
+            assert ("system", "you") in kinds, kinds
+            # And the next turn starts again normally.
+            previous = app.conversation
+            app.query_one("#message", Input).value = "@fake1 and now?"
             await pilot.press("enter")
-            await attendre(pilot,
-                           lambda: app.conversation is not ancienne and app.conversation.done(),
-                           "le tour d'après", 1500)
-            assert un.bulle.corps.strip(), un.bulle.corps
+            await wait_for(pilot,
+                           lambda: app.conversation is not previous and app.conversation.done(),
+                           "the following turn", 1500)
+            assert one.bubble.body.strip(), one.bubble.body
 
 
 async def main() -> None:
-    await scenario_budget()
-    await scenario_radotage()
-    await scenario_refus_commente()
-    await scenario_interruption()
-    print("test_rounds : budget ok · radotage ok · refus commenté ok · interruption ok")
+    await budget_scenario()
+    await repetition_scenario()
+    await commented_refusal_scenario()
+    await interruption_scenario()
+    print("test_rounds: budget ok · repetition ok · commented refusal ok · interruption ok")
 
 
 if __name__ == "__main__":

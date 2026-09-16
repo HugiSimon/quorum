@@ -1,8 +1,8 @@
-"""L'application : une salle, plusieurs bots, un seul fil.
+"""The application: one room, several bots, a single thread.
 
-Le transcript fait foi. Une bulle est créée quand un bot commence à parler — avant d'avoir
-du contenu — et se remplit sur place ; plusieurs peuvent se remplir en même temps, et un bot
-n'insère jamais de ligne dans le bloc d'un autre.
+The transcript is the source of truth. A bubble is created when a bot starts talking —
+before it has any content — and fills in place; several may fill at the same time, and a
+bot never inserts a line inside another one's block.
 """
 
 from __future__ import annotations
@@ -20,1479 +20,1478 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, Static
 
 from . import bot as bots
-from .ecrans import Accueil, EcranFicheBot, EcranReglages, EcranSalle
-from .acp import AcpErreur, ClientAcp, ecrire_fichier
+from .screens import Home, BotCard, SettingsScreen, RoomScreen
+from .acp import AcpError, AcpClient, write_file
 from .room import (
-    Entree,
-    archiver,
-    ecrire_etat,
-    lire_etat,
-    resume_du_fil,
-    decouper_pensee,
-    Salle,
+    Entry,
+    archive,
+    write_state,
+    read_state,
+    thread_summary,
+    split_thought,
+    Room,
     Transcript,
-    charger_salle,
-    destinataires,
-    empreinte,
-    prompt_pour,
-    relances,
+    load_room,
+    recipients,
+    fingerprint,
+    prompt_for,
+    handoffs,
 )
-from . import reglages as config
+from . import settings as config
 from . import telemetry
-from .telemetry import SortiesGemini, identifiant_court
+from .telemetry import GeminiOutputs, short_id
 from .theme import (
-    ANIM_PENSE,
-    appliquer_theme,
-    ANIM_TRAVAILLE,
+    ANIM_THINK,
+    apply_theme,
+    ANIM_WORK,
     ATTENTION,
-    CLIQUABLE,
-    ETATS,
-    FAMILLES,
+    CLICKABLE,
+    STATES,
+    FAMILIES,
     N,
-    ROUGE,
-    VERT,
-    couleur_bot,
-    regle,
-    theme_du_terminal,
+    RED,
+    GREEN,
+    bot_color,
+    divider,
+    terminal_theme,
 )
 
-VIVANTS = ("pense", "execute", "demande")
+LIVE = ("thinking", "running", "asking")
 
-# Au-delà, on considère la mémoire perdue plutôt que de laisser la salle fermée.
-ATTENTE_REPRISE = 30.0
+# Beyond that, we consider the memory lost rather than leaving the room shut.
+RESUME_TIMEOUT = 30.0
 
-# Le `kind` est la seule chose stable : il décide de la couleur et de la place, jamais du
-# libellé. L'agent réel envoie allow_always en premier — laisser cet ordre mettrait la
-# permission la plus large sous la touche 1.
-ORDRE_DES_CHOIX = {"allow_once": 0, "allow_always": 1, "reject_once": 2, "reject_always": 3}
+# The `kind` is the only stable thing: it decides the color and the place, never the label.
+# The real agent sends allow_always first — keeping that order would put the widest
+# permission under key 1.
+CHOICE_ORDER = {"allow_once": 0, "allow_always": 1, "reject_once": 2, "reject_always": 3}
 
 
-def _duree(secondes: float) -> str:
-    return f"{int(secondes) // 60}:{int(secondes) % 60:02d}"
+def _duration(seconds: float) -> str:
+    return f"{int(seconds) // 60}:{int(seconds) % 60:02d}"
 
 
 class Participant:
-    """Un membre de la salle : son bot, son process, sa session, sa bulle du moment."""
+    """A room member: its bot, its process, its session, its current bubble."""
 
     def __init__(self, bot: bots.Bot) -> None:
         self.bot = bot
-        self.couleur = couleur_bot(bot.teinte)
-        self.client: ClientAcp | None = None
+        self.color = bot_color(bot.hue)
+        self.client: AcpClient | None = None
         self.session: dict = {}
-        self.etat = "horsjeu"
-        self.bulle: Bulle | None = None
-        # Les dernières bulles du bot : une sortie arrive plusieurs secondes après, parfois
-        # une fois qu'il a déjà rebondi dans un nouveau bloc.
-        self.bulles: list[Bulle] = []
-        self.panneau: PanneauAutorisation | None = None
-        self.tour: asyncio.Task | None = None
-        self.vu = 0
-        self.empreintes: list[str] = []
-        self.refus: str | None = None  # commentaire à transmettre au tour suivant
-        self.journal: SortiesGemini | None = None
-        self.demarrage = "en file"
-        self.memoire_expiree = False
-        self.derniere_activite = 0.0
-        self.dossier: Path | None = None
-        self.fichiers: dict[str, str] = {}
-        self.chrono: list[tuple[float, str]] = []
-        self.debut_tour = 0.0
+        self.state = "out"
+        self.bubble: Bubble | None = None
+        # The bot's latest bubbles: an output arrives several seconds later, sometimes once
+        # it has already bounced into a new block.
+        self.bubbles: list[Bubble] = []
+        self.panel: PermissionPanel | None = None
+        self.turn: asyncio.Task | None = None
+        self.seen = 0
+        self.fingerprints: list[str] = []
+        self.refusal: str | None = None  # comment to pass on to the next turn
+        self.outputs: GeminiOutputs | None = None
+        self.startup = "queued"
+        self.memory_lost = False
+        self.last_activity = 0.0
+        self.folder: Path | None = None
+        self.files: dict[str, str] = {}
+        self.timeline: list[tuple[float, str]] = []
+        self.turn_start = 0.0
 
     @property
-    def radote(self) -> bool:
-        """Deux messages de suite identiques : le bot tourne en rond, on coupe."""
-        return len(self.empreintes) >= 2 and self.empreintes[-1] == self.empreintes[-2]
+    def repeats(self) -> bool:
+        """Two identical messages in a row: the bot is going in circles, we cut."""
+        return len(self.fingerprints) >= 2 and self.fingerprints[-1] == self.fingerprints[-2]
 
     @property
-    def nom(self) -> str:
-        return self.bot.nom
+    def name(self) -> str:
+        return self.bot.name
 
     @property
-    def pret(self) -> bool:
-        return bool(self.session) and self.client is not None and self.client.vivant
+    def ready(self) -> bool:
+        return bool(self.session) and self.client is not None and self.client.alive
 
 
-class Bulle(Static):
-    """Un bloc d'un auteur : en-tête, outils, corps. Le même gabarit pour tout le monde."""
+class Bubble(Static):
+    """One author's block: header, tools, body. The same template for everyone."""
 
     def __init__(
         self,
-        auteur: str,
+        author: str,
         role: str,
-        couleur: str,
-        heure: str,
-        etat: str | None = None,
-        debut: float | None = None,
+        color: str,
+        clock: str,
+        state: str | None = None,
+        start: float | None = None,
     ) -> None:
         super().__init__()
-        self.auteur, self.role, self.couleur, self.heure = auteur, role, couleur, heure
-        self.etat = etat
-        self.debut = debut
-        self.corps = ""
-        self.outils: list[dict] = []
-        self.jalons: list[dict] = []
-        self.proprietaire: str | None = None
-        self.raisonnement_visible = True
-        self.raisonnement = "replié"
-        self.compacte = False
+        self.author, self.role, self.color, self.clock = author, role, color, clock
+        self.state = state
+        self.start = start
+        self.body = ""
+        self.tools: list[dict] = []
+        self.steps: list[dict] = []
+        self.owner: str | None = None
+        self.thinking_visible = True
+        self.thinking = "folded"
+        self.compact = False
         self.phase = 0
 
-    def rendu(self) -> Text:
-        texte = Text()
-        texte.append("▌ ", style=self.couleur)
-        texte.append(self.auteur, style=f"bold {self.couleur}")
-        if self.role and not self.compacte:
-            texte.append(f"  {self.role}", style=N["dim"])
-        texte.append(f" · {self.heure_relative if self.compacte else self.heure}", style=N["faible"])
+    def draw(self) -> Text:
+        text = Text()
+        text.append("▌ ", style=self.color)
+        text.append(self.author, style=f"bold {self.color}")
+        if self.role and not self.compact:
+            text.append(f"  {self.role}", style=N["dim"])
+        text.append(f" · {self.relative_time if self.compact else self.clock}", style=N["faint"])
 
-        if self.etat is not None:
-            glyphe, mot = ETATS[self.etat]
-            if self.etat == "pense":
-                glyphe = ANIM_PENSE[self.phase % len(ANIM_PENSE)]
-            elif self.etat == "execute":
-                glyphe = ANIM_TRAVAILLE[self.phase % len(ANIM_TRAVAILLE)]
-            texte.append(f"  {glyphe} {mot}", style=self.couleur)
-            if self.etat in VIVANTS and self.debut is not None:
-                texte.append(f" · {_duree(time.monotonic() - self.debut)}", style=N["faible"])
-        texte.append("\n")
+        if self.state is not None:
+            glyph, word = STATES[self.state]
+            if self.state == "thinking":
+                glyph = ANIM_THINK[self.phase % len(ANIM_THINK)]
+            elif self.state == "running":
+                glyph = ANIM_WORK[self.phase % len(ANIM_WORK)]
+            text.append(f"  {glyph} {word}", style=self.color)
+            if self.state in LIVE and self.start is not None:
+                text.append(f" · {_duration(time.monotonic() - self.start)}", style=N["faint"])
+        text.append("\n")
 
-        for outil in self.outils:
-            texte.append_text(self.ligne_outil(outil))
+        for tool in self.tools:
+            text.append_text(self.tool_line(tool))
 
-        for ligne in self.corps.rstrip().splitlines():
-            texte.append(f"    {ligne}\n", style=N["encre"])
+        for line in self.body.rstrip().splitlines():
+            text.append(f"    {line}\n", style=N["ink"])
 
-        # Pendant le travail on montre les jalons ; une fois le message écrit, il se suffit.
-        fini = self.etat in ("fini", "horsjeu", "echec")
-        if self.raisonnement_visible and self.jalons and not fini and not self.compacte:
-            montres = (
-                self.jalons if self.raisonnement == "déplié"
-                else self.jalons[-1:] if self.raisonnement == "dernière ligne"
+        # While it works we show the steps; once the message is written, it stands alone.
+        done = self.state in ("done", "out", "failed")
+        if self.thinking_visible and self.steps and not done and not self.compact:
+            shown = (
+                self.steps if self.thinking == "unfolded"
+                else self.steps[-1:] if self.thinking == "last line"
                 else []
             )
-            for jalon in montres:
-                texte.append("  ┊ ", style=self.couleur)
-                texte.append(f"{jalon['titre']}\n", style=N["dim"])
+            for step in shown:
+                text.append("  ┊ ", style=self.color)
+                text.append(f"{step['title']}\n", style=N["dim"])
 
-        if fini and self.raisonnement_visible and (self.jalons or self.outils):
-            compte = f"{len(self.outils)} outils"
-            if self.jalons:
-                compte += f" · {len(self.jalons)} jalons"
-            texte.append(f"    ┊ {compte}\n", style=N["faible"])
-        return texte
+        if done and self.thinking_visible and (self.steps or self.tools):
+            count = f"{len(self.tools)} tools"
+            if self.steps:
+                count += f" · {len(self.steps)} steps"
+            text.append(f"    ┊ {count}\n", style=N["faint"])
+        return text
 
-    def ligne_outil(self, outil: dict) -> Text:
-        """Une ligne d'outil : famille · titre · durée, et le sort de sa sortie.
+    def tool_line(self, tool: dict) -> Text:
+        """A tool line: family · title · duration, and the fate of its output.
 
-        La sortie n'arrive pas avec la fin de l'outil : une à deux secondes plus tard, par
-        le journal local. « sortie en route » est l'état normal, pas une anomalie.
+        The output does not arrive with the end of the tool: one or two seconds later,
+        through the local log. "output on the way" is the normal state, not an anomaly.
         """
-        braille = ANIM_TRAVAILLE[self.phase % len(ANIM_TRAVAILLE)]
-        texte = Text()
-        texte.append("  ▸ ", style=self.couleur)
-        if outil.get("famille"):
-            texte.append(f"{outil['famille']} · ", style=N["faible"])
-        texte.append(outil["titre"], style=N["dim"])
-        if not outil.get("fin"):
-            texte.append(f"  {braille}\n", style=N["faible"])
-            return texte
+        braille = ANIM_WORK[self.phase % len(ANIM_WORK)]
+        text = Text()
+        text.append("  ▸ ", style=self.color)
+        if tool.get("family"):
+            text.append(f"{tool['family']} · ", style=N["faint"])
+        text.append(tool["title"], style=N["dim"])
+        if not tool.get("end"):
+            text.append(f"  {braille}\n", style=N["faint"])
+            return text
 
-        texte.append(f"  ✓ {outil['fin'] - outil['debut']:.1f}s", style=N["faible"])
-        if outil.get("sortie") is not None:
-            retard = outil.get("arrivee", outil["fin"]) - outil["fin"]
-            texte.append(f" · sortie +{retard:.1f}s\n", style=N["faible"])
-            for ligne in str(outil["sortie"]).rstrip().splitlines()[:12]:
-                texte.append(f"      {ligne}\n", style=N["dim"])
-        elif outil.get("attend_sortie"):
-            texte.append(f" · sortie en route {braille}\n", style=N["faible"])
-        elif outil.get("sortie_perdue"):
-            texte.append(" · sortie non parvenue\n", style=N["faible"])
+        text.append(f"  ✓ {tool['end'] - tool['start']:.1f}s", style=N["faint"])
+        if tool.get("output") is not None:
+            late = tool.get("arrival", tool["end"]) - tool["end"]
+            text.append(f" · output +{late:.1f}s\n", style=N["faint"])
+            for line in str(tool["output"]).rstrip().splitlines()[:12]:
+                text.append(f"      {line}\n", style=N["dim"])
+        elif tool.get("awaiting_output"):
+            text.append(f" · output on the way {braille}\n", style=N["faint"])
+        elif tool.get("output_lost"):
+            text.append(" · output never came\n", style=N["faint"])
         else:
-            texte.append("\n")
-        return texte
+            text.append("\n")
+        return text
 
-    def rafraichir(self) -> None:
-        self.update(self.rendu())
-
-    @property
-    def heure_relative(self) -> str:
-        """Sous 100 colonnes l'horodatage passe en relatif : deux caractères au lieu de cinq."""
-        if self.debut is None:
-            return self.heure
-        minutes = int((time.monotonic() - self.debut) // 60)
-        return "maintenant" if minutes < 1 else f"il y a {minutes} min"
+    def redraw(self) -> None:
+        self.update(self.draw())
 
     @property
-    def texte_brut(self) -> str:
-        return f"{self.auteur} {self.corps}"
+    def relative_time(self) -> str:
+        """Under 100 columns the timestamp goes relative: two characters instead of five."""
+        if self.start is None:
+            return self.clock
+        minutes = int((time.monotonic() - self.start) // 60)
+        return "now" if minutes < 1 else f"{minutes} min ago"
 
-    def titres_outils(self) -> list[str]:
-        return [f"{o.get('famille', '')} {o['titre']}".strip() for o in self.outils]
+    @property
+    def plain_text(self) -> str:
+        return f"{self.author} {self.body}"
+
+    def tool_titles(self) -> list[str]:
+        return [f"{t.get('family', '')} {t['title']}".strip() for t in self.tools]
 
 
-class PanneauAutorisation(Static):
-    """Les choix viennent de l'agent : libellés tels quels, place imposée par le design.
+class PermissionPanel(Static):
+    """The choices come from the agent: labels as they are, placement set by the design.
 
-    Rien n'est écrit en dur : le nombre d'options varie d'un outil à l'autre et d'un
-    fournisseur à l'autre. Plusieurs bots peuvent en avoir un chacun — ⇥ passe au suivant.
+    Nothing is hard-coded: the number of options varies from one tool to the next and from
+    one provider to another. Several bots may each have one — ⇥ moves to the next.
     """
 
     can_focus = True
 
-    def __init__(self, participant: Participant, params: dict, reponse: asyncio.Future) -> None:
+    def __init__(self, participant: Participant, params: dict, answer: asyncio.Future) -> None:
         super().__init__()
         self.participant = participant
         self.options = sorted(
             params.get("options", []),
-            key=lambda o: ORDRE_DES_CHOIX.get(str(o.get("kind", "")), 4),
+            key=lambda o: CHOICE_ORDER.get(str(o.get("kind", "")), 4),
         )
-        self.appel = params.get("toolCall", {})
-        self.reponse = reponse
+        self.call = params.get("toolCall", {})
+        self.answer = answer
         self.decision: str | None = None
         self.phase = 0
 
     def on_mount(self) -> None:
-        self.rafraichir()
+        self.redraw()
 
-    def rafraichir(self) -> None:
-        clignote = "◆" if self.decision or self.phase % 2 == 0 else " "
-        texte = Text()
-        texte.append(f"  {clignote} ", style=ATTENTION)
-        texte.append(f"@{self.participant.nom}", style=f"bold {self.participant.couleur}")
-        texte.append(" demande une autorisation", style=ATTENTION)
-        texte.append("\n", style=N["faible"])
+    def redraw(self) -> None:
+        blink = "◆" if self.decision or self.phase % 2 == 0 else " "
+        text = Text()
+        text.append(f"  {blink} ", style=ATTENTION)
+        text.append(f"@{self.participant.name}", style=f"bold {self.participant.color}")
+        text.append(" asks for permission", style=ATTENTION)
+        text.append("\n", style=N["faint"])
 
-        titre = self.appel.get("title") or self.appel.get("toolCallId", "")
-        if titre:
-            texte.append(f"    {titre}\n", style=N["encre"])
+        title = self.call.get("title") or self.call.get("toolCallId", "")
+        if title:
+            text.append(f"    {title}\n", style=N["ink"])
 
         if self.decision:
-            texte.append(f"    → {self.decision}\n", style=N["dim"])
-        elif self.app.compacte:
-            texte.append("    ")
+            text.append(f"    → {self.decision}\n", style=N["dim"])
+        elif self.app.compact:
+            text.append("    ")
             for i, option in enumerate(self.options, 1):
-                genre = str(option.get("kind", ""))
-                refus = genre.startswith("reject")
-                marque = ("✕" if refus else "✓") * (2 if genre.endswith("always") else 1)
-                verbe = str(option.get("name", option.get("optionId", ""))).split()[0].lower()
-                texte.append(f"{i} ", style=CLIQUABLE)
-                texte.append(f"{marque}{verbe}", style=ROUGE if refus else VERT)
-                texte.append(" · ", style=N["faible"])
-            texte.append("r commenter\n", style=N["faible"])
+                kind = str(option.get("kind", ""))
+                refused = kind.startswith("reject")
+                mark = ("✕" if refused else "✓") * (2 if kind.endswith("always") else 1)
+                verb = str(option.get("name", option.get("optionId", ""))).split()[0].lower()
+                text.append(f"{i} ", style=CLICKABLE)
+                text.append(f"{mark}{verb}", style=RED if refused else GREEN)
+                text.append(" · ", style=N["faint"])
+            text.append("r comment\n", style=N["faint"])
         else:
             for i, option in enumerate(self.options, 1):
-                genre = str(option.get("kind", ""))
-                refus = genre.startswith("reject")
-                marque = ("✕" if refus else "✓") * (2 if genre.endswith("always") else 1)
-                texte.append(f"    {i} ", style=CLIQUABLE)
-                texte.append(f"{marque} ", style=ROUGE if refus else VERT)
-                texte.append(f"{option.get('name', option.get('optionId'))}\n", style=N["encre"])
-            texte.append("    1-9 ", style=CLIQUABLE)
-            texte.append("décider   ", style=N["dim"])
-            texte.append("r ", style=CLIQUABLE)
-            texte.append("refuser en expliquant   ", style=N["dim"])
-            texte.append("⇥ ", style=CLIQUABLE)
-            texte.append("demande suivante   ", style=N["dim"])
-            texte.append("esc ", style=CLIQUABLE)
-            texte.append("revenir à la saisie\n", style=N["dim"])
-        self.update(texte)
+                kind = str(option.get("kind", ""))
+                refused = kind.startswith("reject")
+                mark = ("✕" if refused else "✓") * (2 if kind.endswith("always") else 1)
+                text.append(f"    {i} ", style=CLICKABLE)
+                text.append(f"{mark} ", style=RED if refused else GREEN)
+                text.append(f"{option.get('name', option.get('optionId'))}\n", style=N["ink"])
+            text.append("    1-9 ", style=CLICKABLE)
+            text.append("decide   ", style=N["dim"])
+            text.append("r ", style=CLICKABLE)
+            text.append("refuse with a reason   ", style=N["dim"])
+            text.append("⇥ ", style=CLICKABLE)
+            text.append("next request   ", style=N["dim"])
+            text.append("esc ", style=CLICKABLE)
+            text.append("back to typing\n", style=N["dim"])
+        self.update(text)
 
-    def rendre_la_saisie(self) -> None:
-        """Redonne le focus à la saisie, si elle est encore là."""
-        saisies = self.screen.query("#message")
-        if saisies:
-            saisies.first(Input).focus()
+    def give_back_input(self) -> None:
+        """Hands the focus back to the input, if it is still there."""
+        inputs = self.screen.query("#message")
+        if inputs:
+            inputs.first(Input).focus()
 
     def on_focus(self) -> None:
-        self.rafraichir()
+        self.redraw()
 
     def on_blur(self) -> None:
-        self.rafraichir()
+        self.redraw()
 
-    def on_key(self, evenement) -> None:
+    def on_key(self, event) -> None:
         if self.decision is not None:
             return
-        if evenement.key == "escape":
-            self.rendre_la_saisie()
-            evenement.stop()
-        elif evenement.key == "r":
-            evenement.stop()
-            refus = next(
+        if event.key == "escape":
+            self.give_back_input()
+            event.stop()
+        elif event.key == "r":
+            event.stop()
+            refusal = next(
                 (o for o in self.options if str(o.get("kind", "")) == "reject_once"), None
             )
-            if refus is not None:
-                self.app.ouvrir_refus(self, refus)
-        elif evenement.key.isdigit() and 1 <= int(evenement.key) <= len(self.options):
-            self.choisir(self.options[int(evenement.key) - 1])
-            evenement.stop()
+            if refusal is not None:
+                self.app.open_refusal(self, refusal)
+        elif event.key.isdigit() and 1 <= int(event.key) <= len(self.options):
+            self.choose(self.options[int(event.key) - 1])
+            event.stop()
 
-    def choisir(self, option: dict) -> None:
+    def choose(self, option: dict) -> None:
         self.decision = option.get("name", option.get("optionId"))
-        if not self.reponse.done():
-            self.reponse.set_result({"outcome": "selected", "optionId": option["optionId"]})
-        self.rafraichir()
-        self.rendre_la_saisie()
+        if not self.answer.done():
+            self.answer.set_result({"outcome": "selected", "optionId": option["optionId"]})
+        self.redraw()
+        self.give_back_input()
 
-    def refuser(self, option: dict, commentaire: str) -> None:
-        """Refuse, puis fait suivre le commentaire au bot par un prompt — et au fil par une ligne."""
-        self.participant.refus = commentaire or None
-        if commentaire:
-            self.app.tracer_refus(self.participant, commentaire)
-        self.choisir(option)
+    def refuse(self, option: dict, comment: str) -> None:
+        """Refuses, then passes the comment to the bot as a prompt — and to the thread as a line."""
+        self.participant.refusal = comment or None
+        if comment:
+            self.app.log_refusal(self.participant, comment)
+        self.choose(option)
 
-    def abandonner(self) -> None:
-        """L'annulation a déjà répondu à l'agent : ici on garde la trace et on rend la saisie.
+    def abandon(self) -> None:
+        """Cancelling already answered the agent: here we keep the trace and give the input back.
 
-        Sans ce dernier geste, le focus reste sur un panneau mort et plus rien ne s'écrit.
+        Without that last gesture, the focus stays on a dead panel and nothing gets written.
         """
         if self.decision is None:
-            self.decision = "annulée"
-            self.rafraichir()
-        self.rendre_la_saisie()
+            self.decision = "cancelled"
+            self.redraw()
+        self.give_back_input()
 
 
-class ZoneRefus(Vertical):
-    """Le commentaire de refus part au bot, et se pose aussi dans le fil.
+class RefusalBox(Vertical):
+    """The refusal comment goes to the bot, and lands in the thread too.
 
-    La réponse d'autorisation n'a aucun champ texte : le commentaire ne peut pas passer par
-    là. Il part en prompt juste après, et le fil en garde la trace pour les autres bots.
+    The permission answer has no text field: the comment cannot travel there. It leaves as
+    a prompt right after, and the thread keeps the trace for the other bots.
     """
 
-    def __init__(self, panneau: "PanneauAutorisation", option: dict) -> None:
+    def __init__(self, panel: "PermissionPanel", option: dict) -> None:
         super().__init__()
-        self.panneau, self.option = panneau, option
+        self.panel, self.option = panel, option
 
     def compose(self) -> ComposeResult:
-        entete = Static()
-        entete.update(
+        header = Static()
+        header.update(
             Text.assemble(
-                ("  ✕ ", ROUGE),
-                (f"refuser la demande de @{self.panneau.participant.nom}", N["encre"]),
-                (" — dis-lui pourquoi (facultatif)\n", N["dim"]),
-                ("    ⏎ refuser et envoyer · esc revenir aux choix", N["faible"]),
+                ("  ✕ ", RED),
+                (f"refuse @{self.panel.participant.name}'s request", N["ink"]),
+                (" — tell it why (optional)\n", N["dim"]),
+                ("    ⏎ refuse and send · esc back to the choices", N["faint"]),
             )
         )
-        yield entete
-        yield Input(placeholder="…", id="refus")
+        yield header
+        yield Input(placeholder="…", id="refusal")
 
     def on_mount(self) -> None:
         self.query_one(Input).focus()
 
-    def on_input_submitted(self, evenement: Input.Submitted) -> None:
-        evenement.stop()
-        self.panneau.refuser(self.option, evenement.value.strip())
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        event.stop()
+        self.panel.refuse(self.option, event.value.strip())
         self.remove()
 
-    def on_key(self, evenement) -> None:
-        if evenement.key == "escape":
-            evenement.stop()
-            self.panneau.focus()
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            self.panel.focus()
             self.remove()
 
 
 
-class PanneauDemarrage(Static):
-    """S3 : le fil s'affiche tout de suite, les membres se lèvent un par un."""
+class StartupPanel(Static):
+    """S3: the thread shows up right away, the members stand up one by one."""
 
     def __init__(self, participants: dict) -> None:
         super().__init__()
         self.participants = participants
         self.phase = 0
 
-    def rafraichir(self) -> None:
+    def redraw(self) -> None:
         self.phase += 1
-        texte = Text()
-        texte.append_text(regle("DÉMARRAGE", 60))
+        text = Text()
+        text.append_text(divider("STARTING UP", 60))
         for participant in self.participants.values():
-            marque = {
-                "en file": ("·", N["faible"]),
-                "connexion": (ANIM_PENSE[self.phase % len(ANIM_PENSE)], participant.couleur),
-                "session": (ANIM_PENSE[self.phase % len(ANIM_PENSE)], participant.couleur),
-                "repris": ("✓", VERT),
-                "neuf": ("✓", VERT),
-                "évincé": ("◌", N["faible"]),
-                "échec": ("✕", ROUGE),
-            }.get(participant.demarrage, ("·", N["faible"]))
-            texte.append("  ▌ ", style=participant.couleur)
-            texte.append(f"@{participant.nom}", style=f"bold {participant.couleur}")
+            mark = {
+                "queued": ("·", N["faint"]),
+                "connecting": (ANIM_THINK[self.phase % len(ANIM_THINK)], participant.color),
+                "session": (ANIM_THINK[self.phase % len(ANIM_THINK)], participant.color),
+                "resumed": ("✓", GREEN),
+                "fresh": ("✓", GREEN),
+                "evicted": ("◌", N["faint"]),
+                "failed": ("✕", RED),
+            }.get(participant.startup, ("·", N["faint"]))
+            text.append("  ▌ ", style=participant.color)
+            text.append(f"@{participant.name}", style=f"bold {participant.color}")
             detail = {
-                "en file": "en file",
-                "connexion": "connexion au fournisseur",
-                "session": "ouverture de la session",
-                "repris": "contexte repris",
-                "neuf": "session neuve",
-                "évincé": "mémoire rendue",
-                "échec": "n'a pas pu démarrer",
-            }.get(participant.demarrage, participant.demarrage)
-            texte.append(f"  {detail} ", style=N["dim"])
-            texte.append(f"{marque[0]}\n", style=marque[1])
-        self.update(texte)
-        self.texte_brut = texte.plain
+                "queued": "queued",
+                "connecting": "connecting to the provider",
+                "session": "opening the session",
+                "resumed": "context resumed",
+                "fresh": "fresh session",
+                "evicted": "memory released",
+                "failed": "could not start",
+            }.get(participant.startup, participant.startup)
+            text.append(f"  {detail} ", style=N["dim"])
+            text.append(f"{mark[0]}\n", style=mark[1])
+        self.update(text)
+        self.plain_text = text.plain
 
 
-class PanneauExpiration(Static):
-    """S10 : les bots ont perdu leur mémoire de travail ; le fil, lui, est intact."""
+class ExpiryPanel(Static):
+    """S10: the bots lost their working memory; the thread itself is intact."""
 
     can_focus = True
 
-    CHOIX = ("relire le fil et repartir de là", "résumer le fil pour eux", "archiver")
+    CHOICES = ("re-read the thread and start from there", "summarise the thread for them",
+               "archive")
 
-    def __init__(self, noms: list[str], messages: int) -> None:
+    def __init__(self, names: list[str], messages: int) -> None:
         super().__init__()
-        self.noms, self.messages = noms, messages
-        self.texte_brut = ""
+        self.names, self.messages = names, messages
+        self.plain_text = ""
 
     def on_mount(self) -> None:
-        texte = Text()
-        texte.append("  ◌ mémoire expirée · ", style=ATTENTION)
-        texte.append(", ".join(f"@{n}" for n in self.noms), style=N["encre"])
-        texte.append(
-            f"\n    le fil est intact ({self.messages} messages), leur mémoire de travail non.\n",
+        text = Text()
+        text.append("  ◌ memory expired · ", style=ATTENTION)
+        text.append(", ".join(f"@{n}" for n in self.names), style=N["ink"])
+        text.append(
+            f"\n    the thread is intact ({self.messages} messages), their working memory is not.\n",
             style=N["dim"],
         )
-        for i, choix in enumerate(self.CHOIX, 1):
-            texte.append(f"    {i} ", style=CLIQUABLE)
-            texte.append(f"{choix}\n", style=N["encre"])
-        texte.append("    esc revenir à la saisie — le fil reste lisible\n", style=N["faible"])
-        self.update(texte)
-        self.texte_brut = texte.plain
+        for i, choice in enumerate(self.CHOICES, 1):
+            text.append(f"    {i} ", style=CLICKABLE)
+            text.append(f"{choice}\n", style=N["ink"])
+        text.append("    esc back to typing — the thread stays readable\n", style=N["faint"])
+        self.update(text)
+        self.plain_text = text.plain
         self.call_after_refresh(self.focus)
 
-    def on_key(self, evenement) -> None:
-        if evenement.key == "escape":
-            evenement.stop()
-            saisies = self.screen.query("#message")
-            if saisies:
-                saisies.first(Input).focus()
-        elif evenement.key in ("1", "2", "3"):
-            evenement.stop()
-            self.app.trancher_expiration(int(evenement.key), self.noms)
+    def on_key(self, event) -> None:
+        if event.key == "escape":
+            event.stop()
+            inputs = self.screen.query("#message")
+            if inputs:
+                inputs.first(Input).focus()
+        elif event.key in ("1", "2", "3"):
+            event.stop()
+            self.app.settle_expiry(int(event.key), self.names)
             self.remove()
 
 
-class EcranRaisonnement(Screen):
-    """S7 : le travail d'un bot, en direct et en plein écran.
+class ThinkingScreen(Screen):
+    """S7: a bot's work, live and full screen.
 
-    Les jalons et les outils se mêlent dans l'ordre où ils sont arrivés. Rien sur les
-    jetons : le décompte n'existe qu'à la fin du tour.
+    Steps and tools mingle in the order they arrived. Nothing about tokens: the count only
+    exists at the end of the turn.
     """
 
     CSS = """
-    EcranRaisonnement { background: $fond; }
+    ThinkingScreen { background: $bg; }
     #detail { padding: 1 2; }
-    #pied { height: 1; padding: 0 2; color: $dim; background: $panneau; }
+    #footer { height: 1; padding: 0 2; color: $dim; background: $panel; }
     """
 
     BINDINGS = [
-        Binding("escape", "fermer", "revenir au fil", priority=True),
-        Binding("tab", "suivant", "raisonnement suivant", priority=True),
+        Binding("escape", "close", "back to the thread", priority=True),
+        Binding("tab", "next", "next reasoning", priority=True),
     ]
 
-    def __init__(self, nom: str) -> None:
+    def __init__(self, bot_name: str) -> None:
         super().__init__()
-        self.nom = nom
-        self.dernier_rendu = Text()
+        self.bot_name = bot_name
+        self.last_render = Text()
 
     def compose(self) -> ComposeResult:
         with VerticalScroll():
             yield Static(id="detail")
-        yield Static(id="pied")
+        yield Static(id="footer")
 
     def on_mount(self) -> None:
-        self.set_interval(0.16, self.rafraichir)
-        self.rafraichir()
+        self.set_interval(0.16, self.redraw)
+        self.redraw()
 
-    def action_fermer(self) -> None:
+    def action_close(self) -> None:
         self.app.pop_screen()
 
-    def action_suivant(self) -> None:
-        noms = [n for n, p in self.app.participants.items() if p.bulle is not None]
-        if len(noms) > 1:
-            self.nom = noms[(noms.index(self.nom) + 1) % len(noms)] if self.nom in noms else noms[0]
-            self.rafraichir()
+    def action_next(self) -> None:
+        names = [n for n, p in self.app.participants.items() if p.bubble is not None]
+        if len(names) > 1:
+            self.bot_name = names[(names.index(self.bot_name) + 1) % len(names)] if self.bot_name in names else names[0]
+            self.redraw()
 
-    def rafraichir(self) -> None:
-        participant = self.app.participants[self.nom]
-        bulle = participant.bulle
-        largeur = max(40, self.size.width - 4)
-        texte = Text()
+    def redraw(self) -> None:
+        participant = self.app.participants[self.bot_name]
+        bubble = participant.bubble
+        width = max(40, self.size.width - 4)
+        text = Text()
 
-        glyphe, mot = ETATS[participant.etat]
-        texte.append("▌ ", style=participant.couleur)
-        texte.append(f"@{participant.nom}", style=f"bold {participant.couleur}")
-        texte.append(" · raisonnement", style=N["dim"])
-        if bulle is not None:
-            texte.append(
-                f"    {glyphe} {mot} · {_duree(time.monotonic() - participant.debut_tour)}"
-                f" · {len(bulle.outils)} outils\n\n",
-                style=N["faible"],
+        glyph, word = STATES[participant.state]
+        text.append("▌ ", style=participant.color)
+        text.append(f"@{participant.name}", style=f"bold {participant.color}")
+        text.append(" · reasoning", style=N["dim"])
+        if bubble is not None:
+            text.append(
+                f"    {glyph} {word} · {_duration(time.monotonic() - participant.turn_start)}"
+                f" · {len(bubble.tools)} tools\n\n",
+                style=N["faint"],
             )
         else:
-            texte.append("    rien en cours\n\n", style=N["faible"])
+            text.append("    nothing in flight\n\n", style=N["faint"])
 
-        if bulle is not None:
-            texte.append_text(
-                regle("JALONS", largeur, "titres émis par l'agent · anglais, par blocs entiers")
+        if bubble is not None:
+            text.append_text(
+                divider("STEPS", width, "titles emitted by the agent · English, in whole blocks")
             )
-            texte.append_text(self.entrelacer(bulle, participant, largeur))
-            texte.append("\n")
+            text.append_text(self.interleave(bubble, participant, width))
+            text.append("\n")
 
-            texte.append_text(regle("FICHIERS TOUCHÉS", largeur))
-            if participant.fichiers:
-                for chemin, action in participant.fichiers.items():
-                    texte.append(f"  {chemin}", style=N["encre"])
-                    texte.append(f"  {action}\n", style=N["faible"])
+            text.append_text(divider("FILES TOUCHED", width))
+            if participant.files:
+                for path, action in participant.files.items():
+                    text.append(f"  {path}", style=N["ink"])
+                    text.append(f"  {action}\n", style=N["faint"])
             else:
-                texte.append("  aucun pour l'instant\n", style=N["faible"])
-            texte.append("\n")
+                text.append("  none so far\n", style=N["faint"])
+            text.append("\n")
 
-            texte.append_text(regle("CHRONO", largeur))
-            for instant, quoi in participant.chrono[-12:]:
-                texte.append(f"  {_duree(instant)} ", style=N["faible"])
-                texte.append(f"{quoi}\n", style=N["dim"])
-            texte.append("\n")
+            text.append_text(divider("TIMELINE", width))
+            for moment, what in participant.timeline[-12:]:
+                text.append(f"  {_duration(moment)} ", style=N["faint"])
+                text.append(f"{what}\n", style=N["dim"])
+            text.append("\n")
 
-        texte.append_text(regle("AUTRES BOTS", largeur))
-        for autre in self.app.participants.values():
-            if autre.nom == self.nom:
+        text.append_text(divider("OTHER BOTS", width))
+        for other in self.app.participants.values():
+            if other.name == self.bot_name:
                 continue
-            signe, sens = ETATS[autre.etat]
-            texte.append(f"  {signe} ", style=autre.couleur)
-            texte.append(f"@{autre.nom} {sens}\n", style=N["dim"])
-        texte.append("\n")
-        texte.append_text(
-            regle("JETONS", largeur, "le décompte n'existe qu'à la fin du tour")
+            sign, meaning = STATES[other.state]
+            text.append(f"  {sign} ", style=other.color)
+            text.append(f"@{other.name} {meaning}\n", style=N["dim"])
+        text.append("\n")
+        text.append_text(
+            divider("TOKENS", width, "the count only exists at the end of the turn")
         )
-        self.dernier_rendu = texte
-        self.query_one("#detail", Static).update(texte)
+        self.last_render = text
+        self.query_one("#detail", Static).update(text)
 
-        pied = Text()
-        pied.append("esc revenir au fil · ⇥ raisonnement suivant", style=N["faible"])
-        pied.append(f"    ^C arrêter @{self.nom} seul", style=N["faible"])
-        self.query_one("#pied", Static).update(pied)
+        footer = Text()
+        footer.append("esc back to the thread · ⇥ next reasoning", style=N["faint"])
+        footer.append(f"    ^C stop @{self.bot_name} alone", style=N["faint"])
+        self.query_one("#footer", Static).update(footer)
 
-    def entrelacer(self, bulle: Bulle, participant: Participant, largeur: int) -> Text:
-        """Jalons et outils dans l'ordre d'arrivée — le dernier jalon s'ouvre, les autres non."""
-        evenements: list[tuple[float, str, object]] = [
-            (jalon["t"], "jalon", jalon) for jalon in bulle.jalons
+    def interleave(self, bubble: Bubble, participant: Participant, width: int) -> Text:
+        """Steps and tools in arrival order — the last step opens, the others do not."""
+        events: list[tuple[float, str, object]] = [
+            (step["t"], "step", step) for step in bubble.steps
         ]
-        evenements += [
-            (outil["debut"] - participant.debut_tour, "outil", outil) for outil in bulle.outils
+        events += [
+            (tool["start"] - participant.turn_start, "tool", tool) for tool in bubble.tools
         ]
-        evenements.sort(key=lambda e: e[0])
-        dernier = bulle.jalons[-1] if bulle.jalons else None
+        events.sort(key=lambda e: e[0])
+        last = bubble.steps[-1] if bubble.steps else None
 
-        texte = Text()
-        for instant, genre, objet in evenements:
-            if genre == "outil":
-                texte.append_text(bulle.ligne_outil(objet))
+        text = Text()
+        for moment, kind, item in events:
+            if kind == "tool":
+                text.append_text(bubble.tool_line(item))
                 continue
-            ouvert = objet is dernier
-            texte.append("  ▾ " if ouvert else "  ┊ ", style=participant.couleur)
-            texte.append(objet["titre"], style=N["encre"] if ouvert else N["dim"])
-            texte.append(f"  {_duree(instant)}\n", style=N["faible"])
-            if ouvert and objet["corps"]:
-                for ligne in objet["corps"].splitlines():
-                    texte.append(f"      {ligne}\n", style=N["dim"])
-        if participant.etat == "pense" and bulle.corps == "":
-            texte.append(
-                f"  {ANIM_TRAVAILLE[bulle.phase % len(ANIM_TRAVAILLE)]} rédige sa réponse…\n",
-                style=N["faible"],
+            open_step = item is last
+            text.append("  ▾ " if open_step else "  ┊ ", style=participant.color)
+            text.append(item["title"], style=N["ink"] if open_step else N["dim"])
+            text.append(f"  {_duration(moment)}\n", style=N["faint"])
+            if open_step and item["body"]:
+                for line in item["body"].splitlines():
+                    text.append(f"      {line}\n", style=N["dim"])
+        if participant.state == "thinking" and bubble.body == "":
+            text.append(
+                f"  {ANIM_WORK[bubble.phase % len(ANIM_WORK)]} writing its answer…\n",
+                style=N["faint"],
             )
-        return texte
+        return text
 
 
 class Quorum(App):
     CSS = """
-    Screen { background: $fond; color: $encre; }
-    #entete { height: 1; padding: 0 2; color: $dim; background: $panneau; }
-    #relecture { height: 1; padding: 0 2; color: $attention; }
-    #milieu { height: 1fr; }
-    #fil { width: 1fr; padding: 1 2; }
-    #cote { width: 46; padding: 1 2; background: $panneau; }
-    #fil > Static { margin-bottom: 1; }
-    #fil > Static:focus { background: $panneau; }
-    #fil.compacte > Static { margin-bottom: 0; }
-    #bandeau { height: 1; padding: 0 2; color: $dim; background: $panneau; }
-    #saisie { height: 1; background: $cadre; }
-    #chevron { width: 4; padding: 0 0 0 2; color: $cliquable; text-style: bold;
-               background: $cadre; }
-    Input { border: none; background: $cadre; padding: 0; height: 1; color: $encre; }
+    Screen { background: $bg; color: $ink; }
+    #header { height: 1; padding: 0 2; color: $dim; background: $panel; }
+    #backlog { height: 1; padding: 0 2; color: $attention; }
+    #middle { height: 1fr; }
+    #thread { width: 1fr; padding: 1 2; }
+    #side { width: 46; padding: 1 2; background: $panel; }
+    #thread > Static { margin-bottom: 1; }
+    #thread > Static:focus { background: $panel; }
+    #thread.compact > Static { margin-bottom: 0; }
+    #status { height: 1; padding: 0 2; color: $dim; background: $panel; }
+    #input { height: 1; background: $frame; }
+    #chevron { width: 4; padding: 0 0 0 2; color: $clickable; text-style: bold;
+               background: $frame; }
+    Input { border: none; background: $frame; padding: 0; height: 1; color: $ink; }
     Input > .input--placeholder { color: $dim; }
-    #fil { scrollbar-size-vertical: 1; scrollbar-color: $cadre; scrollbar-color-hover: $dim;
-           scrollbar-color-active: $cliquable; scrollbar-background: $fond;
-           scrollbar-background-hover: $fond; scrollbar-background-active: $fond; }
+    #thread { scrollbar-size-vertical: 1; scrollbar-color: $frame; scrollbar-color-hover: $dim;
+              scrollbar-color-active: $clickable; scrollbar-background: $bg;
+              scrollbar-background-hover: $bg; scrollbar-background-active: $bg; }
     """
 
     BINDINGS = [
-        Binding("ctrl+c", "interrompre", "interrompre le tour", priority=True),
-        Binding("ctrl+q", "quit", "quitter", priority=True),
-        Binding("end", "suivre", "suivre le flux", priority=True),
-        Binding("ctrl+r", "raisonnement", "raisonnement du dernier bot actif", priority=True),
-        Binding("ctrl+b", "fiche", "fiche du bot", priority=True),
-        Binding("ctrl+o", "composer", "composer la salle", priority=True),
-        Binding("ctrl+g", "reglages", "réglages", priority=True),
+        Binding("ctrl+c", "interrupt", "interrupt the turn", priority=True),
+        Binding("ctrl+q", "quit", "quit", priority=True),
+        Binding("end", "follow", "follow the stream", priority=True),
+        Binding("ctrl+r", "thinking", "reasoning of the last active bot", priority=True),
+        Binding("ctrl+b", "bot_card", "bot card", priority=True),
+        Binding("ctrl+o", "compose", "set up the room", priority=True),
+        Binding("ctrl+g", "settings", "settings", priority=True),
     ]
 
-    def __init__(self, salle: Salle, bots_connus: dict[str, bots.Bot]) -> None:
+    def __init__(self, room: Room, known_bots: dict[str, bots.Bot]) -> None:
         super().__init__()
-        # Le thème d'abord : la couleur d'un participant est calculée à sa création.
-        self.reglages = config.lire()
-        appliquer_theme(self.theme_voulu())
-        self.salle = salle
-        self.transcript = Transcript(salle.racine / "transcript.jsonl")
+        # The theme first: a participant's color is computed when it is created.
+        self.settings = config.read()
+        apply_theme(self.wanted_theme())
+        self.room = room
+        self.transcript = Transcript(room.root / "transcript.jsonl")
         self.participants = {
-            nom: Participant(bots_connus[nom]) for nom in salle.membres if nom in bots_connus
+            name: Participant(known_bots[name]) for name in room.members if name in known_bots
         }
-        self.manquants = [nom for nom in salle.membres if nom not in bots_connus]
-        self.non_lus = 0
-        self.debut_tour = 0.0
+        self.missing = [name for name in room.members if name not in known_bots]
+        self.unread = 0
+        self.turn_start = 0.0
         self.conversation: asyncio.Task | None = None
-        self.interrompu = False
-        self.etat_salle = lire_etat(salle)
-        self.demarrage: PanneauDemarrage | None = None
+        self.interrupted = False
+        self.room_state = read_state(room)
+        self.startup: StartupPanel | None = None
 
-    def theme_voulu(self) -> bool:
-        choix = self.reglages.get("theme", "suit le terminal")
-        return theme_du_terminal() if choix == "suit le terminal" else choix == "sombre"
+    def wanted_theme(self) -> bool:
+        choice = self.settings.get("theme", "follow terminal")
+        return terminal_theme() if choice == "follow terminal" else choice == "dark"
 
     def get_css_variables(self) -> dict[str, str]:
-        """La palette passe dans les variables CSS : un seul endroit à basculer."""
+        """The palette goes into the CSS variables: one single place to switch."""
         return {
             **super().get_css_variables(),
-            "fond": N["fond"], "panneau": N["panneau"], "cadre": N["cadre"],
-            "encre": N["encre"], "dim": N["dim"], "faible": N["faible"],
-            "attention": ATTENTION, "cliquable": CLIQUABLE,
+            "bg": N["bg"], "panel": N["panel"], "frame": N["frame"],
+            "ink": N["ink"], "dim": N["dim"], "faint": N["faint"],
+            "attention": ATTENTION, "clickable": CLICKABLE,
         }
 
     def compose(self) -> ComposeResult:
-        yield Static(id="entete")
-        yield Static(id="relecture")
-        with Horizontal(id="milieu"):
-            yield VerticalScroll(id="fil")
-            yield Static(id="cote")
-        yield Static(id="bandeau")
-        with Horizontal(id="saisie"):
+        yield Static(id="header")
+        yield Static(id="backlog")
+        with Horizontal(id="middle"):
+            yield VerticalScroll(id="thread")
+            yield Static(id="side")
+        yield Static(id="status")
+        with Horizontal(id="input"):
             yield Static("◇ ", id="chevron")
-            yield Input(placeholder="écris ici — ⏎ envoyer · @nom pour viser un bot", id="message")
+            yield Input(placeholder="type here — ⏎ send · @name to aim at a bot", id="message")
 
     async def on_mount(self) -> None:
-        self.query_one("#relecture", Static).display = False
-        self.query_one("#entete", Static).update(
-            Text(f"◈ quorum · {self.salle.nom} · {self.salle.dossier}", style=N["dim"])
+        self.query_one("#backlog", Static).display = False
+        self.query_one("#header", Static).update(
+            Text(f"◈ quorum · {self.room.name} · {self.room.folder}", style=N["dim"])
         )
-        for entree in self.transcript.entrees:
-            await self.ajouter(self.bulle_passee(entree))
-        if self.transcript.entrees:
-            await self.ajouter(
-                self.ligne(
-                    f"{len(self.transcript.entrees)} message"
-                    f"{'s' if len(self.transcript.entrees) > 1 else ''} restauré"
-                    f"{'s' if len(self.transcript.entrees) > 1 else ''}",
-                    N["faible"],
+        for entry in self.transcript.entries:
+            await self.add(self.past_bubble(entry))
+        if self.transcript.entries:
+            await self.add(
+                self.notice(
+                    f"{len(self.transcript.entries)} message"
+                    f"{'s' if len(self.transcript.entries) > 1 else ''} restored",
+                    N["faint"],
                 )
             )
-        for nom in self.manquants:
-            await self.ajouter(self.ligne(f"✕ aucun bot nommé « {nom} » dans bots/", ROUGE))
-        self.demarrage = PanneauDemarrage(self.participants)
-        await self.ajouter(self.demarrage)
-        self.set_interval(0.16, self.battre)
-        if self.salle.eviction_minutes:
-            self.set_interval(30.0, self.evincer_inactifs)
-        self.run_worker(self.demarrer_tous())
+        for name in self.missing:
+            await self.add(self.notice(f"✕ no bot named « {name} » in bots/", RED))
+        self.startup = StartupPanel(self.participants)
+        await self.add(self.startup)
+        self.set_interval(0.16, self.beat)
+        if self.room.evict_minutes:
+            self.set_interval(30.0, self.evict_idle)
+        self.run_worker(self.start_all())
 
-    # ── affichage ───────────────────────────────────────────────────────────────────
+    # ── display ─────────────────────────────────────────────────────────────────────
 
-    def ligne(self, texte: str, couleur: str) -> Static:
-        """Une ligne d'annonce dans le fil. `texte_brut` la rend relisible sans le rendu Rich."""
-        bloc = Static()
-        bloc.texte_brut = texte
-        bloc.update(Text(f"  {texte}", style=couleur))
-        return bloc
+    def notice(self, text: str, color: str) -> Static:
+        """An announcement line in the thread. `plain_text` makes it readable without Rich."""
+        block = Static()
+        block.plain_text = text
+        block.update(Text(f"  {text}", style=color))
+        return block
 
-    def bulle_passee(self, entree: Entree) -> Static:
-        """Une entrée relue du disque : figée, sans chrono, avec le compte d'outils."""
-        if entree.genre == "systeme":
-            return self.ligne(f"^C {entree.texte} · {entree.heure}", N["faible"])
-        if entree.genre == "utilisateur":
-            bulle = Bulle(entree.auteur, "", N["encre"], entree.heure)
+    def past_bubble(self, entry: Entry) -> Static:
+        """An entry read back from disk: frozen, no timer, with the tool count."""
+        if entry.kind == "system":
+            return self.notice(f"^C {entry.text} · {entry.clock}", N["faint"])
+        if entry.kind == "user":
+            bubble = Bubble(entry.author, "", N["ink"], entry.clock)
         else:
-            participant = self.participants.get(entree.auteur)
-            couleur = participant.couleur if participant else N["dim"]
+            participant = self.participants.get(entry.author)
+            color = participant.color if participant else N["dim"]
             role = participant.bot.role if participant else ""
-            bulle = Bulle(f"@{entree.auteur}", role, couleur, entree.heure, etat="fini")
-            bulle.proprietaire = entree.auteur if participant else None
-        bulle.corps = entree.texte
-        if entree.outils:
-            bulle.corps = f"({len(entree.outils)} outils) " + bulle.corps
-        bulle.rafraichir()
-        return bulle
+            bubble = Bubble(f"@{entry.author}", role, color, entry.clock, state="done")
+            bubble.owner = entry.author if participant else None
+        bubble.body = entry.text
+        if entry.tools:
+            bubble.body = f"({len(entry.tools)} tools) " + bubble.body
+        bubble.redraw()
+        return bubble
 
-    async def ajouter(self, widget: Static) -> None:
-        """Monte un bloc au bas du fil, et ne suit le flux que si on y est déjà."""
-        fil = self.query_one("#fil", VerticalScroll)
-        en_bas = fil.scroll_offset.y >= fil.max_scroll_y - 1
-        await fil.mount(widget)
-        if en_bas:
-            fil.scroll_end(animate=False)
+    async def add(self, widget: Static) -> None:
+        """Mounts a block at the bottom of the thread, and only follows if we are there."""
+        thread = self.query_one("#thread", VerticalScroll)
+        at_bottom = thread.scroll_offset.y >= thread.max_scroll_y - 1
+        await thread.mount(widget)
+        if at_bottom:
+            thread.scroll_end(animate=False)
         else:
-            self.non_lus += 1
+            self.unread += 1
 
     @property
-    def compacte(self) -> bool:
-        """Sous 100 colonnes, tout est raccourci — jamais retiré."""
-        densite = self.reglages.get("densite", "automatique")
-        if densite == "compacte":
+    def compact(self) -> bool:
+        """Under 100 columns, everything is shortened — never removed."""
+        density = self.settings.get("density", "automatic")
+        if density == "compact":
             return True
-        return densite == "automatique" and self.size.width < 100
+        return density == "automatic" and self.size.width < 100
 
-    def battre(self) -> None:
-        """Un seul battement pour toute l'interface : trois mouvements, pas un de plus."""
-        if self.demarrage is not None:
-            self.demarrage.rafraichir()
-            if all(p.demarrage in ("repris", "neuf", "échec") for p in self.participants.values()):
-                # Le démarrage est un état, pas une trace : il s'efface une fois passé.
-                if not any(p.demarrage == "échec" for p in self.participants.values()):
-                    self.demarrage.remove()
-                self.demarrage = None
+    def beat(self) -> None:
+        """A single beat for the whole interface: three movements, not one more."""
+        if self.startup is not None:
+            self.startup.redraw()
+            if all(p.startup in ("resumed", "fresh", "failed") for p in self.participants.values()):
+                # Starting up is a state, not a trace: it fades once it is over.
+                if not any(p.startup == "failed" for p in self.participants.values()):
+                    self.startup.remove()
+                self.startup = None
         for participant in self.participants.values():
-            if participant.bulle is not None and participant.bulle.etat in VIVANTS:
-                participant.bulle.phase += 1
-                participant.bulle.rafraichir()
-            if participant.panneau is not None and participant.panneau.decision is None:
-                participant.panneau.phase += 1
-                if not participant.panneau.has_focus:
-                    participant.panneau.rafraichir()
+            if participant.bubble is not None and participant.bubble.state in LIVE:
+                participant.bubble.phase += 1
+                participant.bubble.redraw()
+            if participant.panel is not None and participant.panel.decision is None:
+                participant.panel.phase += 1
+                if not participant.panel.has_focus:
+                    participant.panel.redraw()
 
-        # Le fil n'est pas toujours là : un écran de raisonnement peut être au-dessus, et
-        # à la fermeture les widgets partent avant le minuteur.
-        fils, relectures = self.query("#fil"), self.query("#relecture")
-        if not fils or not relectures:
+        # The thread is not always there: a reasoning screen may sit on top, and on closing
+        # the widgets go before the timer.
+        threads, backlogs = self.query("#thread"), self.query("#backlog")
+        if not threads or not backlogs:
             return
-        fil = fils.first(VerticalScroll)
-        fil.set_class(self.compacte, "compacte")
-        for bulle in self.query(Bulle):
-            if bulle.compacte != self.compacte:
-                bulle.compacte = self.compacte
-                bulle.rafraichir()
-        self.peindre_cote()
-        if fil.scroll_offset.y >= fil.max_scroll_y - 1:
-            self.non_lus = 0
-        bandeau_relecture = relectures.first(Static)
-        if self.non_lus:
-            bandeau_relecture.display = True
-            bandeau_relecture.update(
+        thread = threads.first(VerticalScroll)
+        thread.set_class(self.compact, "compact")
+        for bubble in self.query(Bubble):
+            if bubble.compact != self.compact:
+                bubble.compact = self.compact
+                bubble.redraw()
+        self.paint_side()
+        if thread.scroll_offset.y >= thread.max_scroll_y - 1:
+            self.unread = 0
+        backlog_banner = backlogs.first(Static)
+        if self.unread:
+            backlog_banner.display = True
+            backlog_banner.update(
                 Text(
-                    f"↑ tu relis plus haut — le fil ne bougera pas    "
-                    f"{self.non_lus} nouveaux messages ↓ fin",
+                    f"↑ you are reading back — the thread will not move    "
+                    f"{self.unread} new messages ↓ end",
                     style=ATTENTION,
                 )
             )
         else:
-            bandeau_relecture.display = False
-        self.peindre_bandeau()
+            backlog_banner.display = False
+        self.paint_status()
 
-    def peindre_cote(self) -> None:
-        """Au-delà de 160 colonnes les marges deviennent utiles : la salle et le bot actif."""
-        cotes = self.query("#cote")
-        if not cotes:
+    def paint_side(self) -> None:
+        """Beyond 160 columns the margins become useful: the room and the active bot."""
+        sides = self.query("#side")
+        if not sides:
             return
-        cote = cotes.first(Static)
-        cote.display = self.size.width >= 160
-        if not cote.display:
+        side = sides.first(Static)
+        side.display = self.size.width >= 160
+        if not side.display:
             return
-        texte = Text()
-        texte.append_text(regle("DANS CETTE SALLE", 42))
+        text = Text()
+        text.append_text(divider("IN THIS ROOM", 42))
         for participant in self.participants.values():
-            glyphe, mot = ETATS[participant.etat]
-            texte.append(f"  {glyphe} ", style=participant.couleur)
-            texte.append(f"@{participant.nom:<10}", style=participant.couleur)
-            texte.append(f"{mot}\n", style=N["dim"])
-        texte.append("\n")
+            glyph, word = STATES[participant.state]
+            text.append(f"  {glyph} ", style=participant.color)
+            text.append(f"@{participant.name:<10}", style=participant.color)
+            text.append(f"{word}\n", style=N["dim"])
+        text.append("\n")
 
-        actif = next(
+        active = next(
             (p for p in self.participants.values()
-             if p.bulle is not None and p.etat in VIVANTS), None
+             if p.bubble is not None and p.state in LIVE), None
         )
-        if actif is None:
-            texte.append_text(regle("RAISONNEMENT", 42))
-            texte.append("  personne ne travaille\n", style=N["faible"])
+        if active is None:
+            text.append_text(divider("REASONING", 42))
+            text.append("  nobody is working\n", style=N["faint"])
         else:
-            texte.append_text(regle(f"@{actif.nom}", 42, "en direct"))
-            for jalon in actif.bulle.jalons[-4:]:
-                texte.append("  ┊ ", style=actif.couleur)
-                texte.append(f"{jalon['titre'][:36]}\n", style=N["dim"])
-            for outil in actif.bulle.outils[-4:]:
-                texte.append("  ▸ ", style=actif.couleur)
-                texte.append(f"{outil['titre'][:34]}", style=N["dim"])
-                texte.append(" ✓\n" if outil["fin"] else " ◆\n", style=N["faible"])
-        cote.update(texte)
+            text.append_text(divider(f"@{active.name}", 42, "live"))
+            for step in active.bubble.steps[-4:]:
+                text.append("  ┊ ", style=active.color)
+                text.append(f"{step['title'][:36]}\n", style=N["dim"])
+            for tool in active.bubble.tools[-4:]:
+                text.append("  ▸ ", style=active.color)
+                text.append(f"{tool['title'][:34]}", style=N["dim"])
+                text.append(" ✓\n" if tool["end"] else " ◆\n", style=N["faint"])
+        side.update(text)
 
-    def peindre_bandeau(self) -> None:
-        """Un glyphe et un nom par membre, et à droite ce que coûte l'interruption."""
-        gauche = Text()
+    def paint_status(self) -> None:
+        """One glyph and one name per member, and on the right what interrupting costs."""
+        left = Text()
         for participant in self.participants.values():
-            glyphe, _ = ETATS[participant.etat]
-            if participant.etat == "pense":
-                glyphe = ANIM_PENSE[(participant.bulle.phase if participant.bulle else 0) % len(ANIM_PENSE)]
-            gauche.append(f"{glyphe}", style=participant.couleur)
-            gauche.append(f"@{participant.nom}  ", style=N["dim"])
+            glyph, _ = STATES[participant.state]
+            if participant.state == "thinking":
+                glyph = ANIM_THINK[(participant.bubble.phase if participant.bubble else 0) % len(ANIM_THINK)]
+            left.append(f"{glyph}", style=participant.color)
+            left.append(f"@{participant.name}  ", style=N["dim"])
 
-        actifs = [p for p in self.participants.values() if p.tour is not None and not p.tour.done()]
-        droite = (
-            f"^C interrompre · {_duree(time.monotonic() - self.debut_tour)}"
-            if actifs
-            else "^C interrompre · ^Q quitter"
+        busy = [p for p in self.participants.values() if p.turn is not None and not p.turn.done()]
+        right = (
+            f"^C interrupt · {_duration(time.monotonic() - self.turn_start)}"
+            if busy
+            else "^C interrupt · ^Q quit"
         )
-        remplissage = max(1, self.size.width - 4 - gauche.cell_len - len(droite))
-        gauche.append(" " * remplissage)
-        gauche.append(droite, style=N["faible"])
-        bandeaux = self.query("#bandeau")
-        if bandeaux:
-            bandeaux.first(Static).update(gauche)
+        padding = max(1, self.size.width - 4 - left.cell_len - len(right))
+        left.append(" " * padding)
+        left.append(right, style=N["faint"])
+        bars = self.query("#status")
+        if bars:
+            bars.first(Static).update(left)
 
     # ── agents ──────────────────────────────────────────────────────────────────────
 
-    async def demarrer_tous(self) -> None:
-        """Les membres se lèvent en parallèle ; la saisie s'ouvre au premier prêt."""
-        await asyncio.gather(*(self.demarrer(p) for p in self.participants.values()))
-        perdus = [p.nom for p in self.participants.values() if p.memoire_expiree]
-        if perdus and self.transcript.entrees:
-            await self.ajouter(PanneauExpiration(perdus, len(self.transcript.entrees)))
+    async def start_all(self) -> None:
+        """The members stand up in parallel; the input opens as soon as one is ready."""
+        await asyncio.gather(*(self.start_bot(p) for p in self.participants.values()))
+        lost = [p.name for p in self.participants.values() if p.memory_lost]
+        if lost and self.transcript.entries:
+            await self.add(ExpiryPanel(lost, len(self.transcript.entries)))
 
-    def ouvrir_la_saisie(self) -> None:
-        """La saisie s'ouvre dès le premier bot prêt — pas quand tout le monde est levé."""
-        saisies = self.query("#message")
-        if saisies and not saisies.first(Input).has_focus:
-            saisies.first(Input).focus()
+    def focus_input(self) -> None:
+        """The input opens as soon as the first bot is ready — not when everyone is up."""
+        inputs = self.query("#message")
+        if inputs and not inputs.first(Input).has_focus:
+            inputs.first(Input).focus()
 
-    async def dossier_de(self, participant: Participant) -> Path:
-        """Le dossier de travail d'un bot : commun, ou sa propre copie s'il écrit.
+    async def folder_for(self, participant: Participant) -> Path:
+        """A bot's work folder: shared, or its own copy if it writes.
 
-        Hors dépôt git il n'y a pas de worktree possible : on partage le dossier et on le
-        dit, plutôt que de faire croire à une isolation qui n'existe pas.
+        Outside a git repository there is no worktree possible: we share the folder and say
+        so, rather than pretending an isolation that does not exist.
         """
-        if not participant.bot.copie_isolee:
-            return self.salle.dossier
-        copie = self.salle.racine.parents[1] / "runtime" / self.salle.nom / "copies" / participant.nom
-        if copie.exists():
-            return copie
-        copie.parent.mkdir(parents=True, exist_ok=True)
-        processus = await asyncio.create_subprocess_exec(
-            "git", "worktree", "add", "--detach", str(copie),
-            cwd=str(self.salle.dossier),
+        if not participant.bot.own_copy:
+            return self.room.folder
+        copy = self.room.root.parents[1] / "runtime" / self.room.name / "copies" / participant.name
+        if copy.exists():
+            return copy
+        copy.parent.mkdir(parents=True, exist_ok=True)
+        process = await asyncio.create_subprocess_exec(
+            "git", "worktree", "add", "--detach", str(copy),
+            cwd=str(self.room.folder),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.PIPE,
         )
-        _, erreur = await processus.communicate()
-        if processus.returncode == 0:
-            await self.ajouter(
-                self.ligne(f"· @{participant.nom} travaille dans sa copie {copie.name}", N["faible"])
+        _, error = await process.communicate()
+        if process.returncode == 0:
+            await self.add(
+                self.notice(f"· @{participant.name} works in its own copy {copy.name}", N["faint"])
             )
-            return copie
-        await self.ajouter(
-            self.ligne(
-                f"· @{participant.nom} : pas de copie isolée possible ici "
-                f"({erreur.decode(errors='replace').strip().splitlines()[-1:] or ['hors dépôt git']}"
-                f") — dossier commun et politique stricte",
+            return copy
+        await self.add(
+            self.notice(
+                f"· @{participant.name}: no separate copy possible here "
+                f"({error.decode(errors='replace').strip().splitlines()[-1:] or ['outside a git repository']}"
+                f") — shared folder and a strict policy",
                 ATTENTION,
             )
         )
-        return self.salle.dossier
+        return self.room.folder
 
-    async def demarrer(self, participant: Participant) -> None:
-        participant.demarrage = "connexion"
-        participant.dossier = await self.dossier_de(participant)
-        env_projet = bots.lire_env(self.salle.racine.parents[1] / ".env")
-        atelier = self.salle.racine.parents[1] / "runtime" / self.salle.nom
-        journal_telemetrie = getattr(self, "journal_telemetrie", None) or (
-            atelier / f"{participant.nom}.telemetry.jsonl"
+    async def start_bot(self, participant: Participant) -> None:
+        participant.startup = "connecting"
+        participant.folder = await self.folder_for(participant)
+        project_env = bots.read_env(self.room.root.parents[1] / ".env")
+        workshop = self.room.root.parents[1] / "runtime" / self.room.name
+        telemetry_log = getattr(self, "telemetry_log", None) or (
+            workshop / f"{participant.name}.telemetry.jsonl"
         )
-        sorties = (
-            self.salle.conserver_les_sorties and participant.bot.fournisseur == "gemini"
+        outputs = (
+            self.room.keep_outputs and participant.bot.provider == "gemini"
         )
-        if not sorties:
-            journal_telemetrie = None
+        if not outputs:
+            telemetry_log = None
         else:
-            # Impérativement avant le lancement : supprimer le fichier ensuite laisserait
-            # l'agent écrire dans un inode effacé, et aucune sortie ne remonterait jamais.
-            journal_telemetrie.parent.mkdir(parents=True, exist_ok=True)
-            journal_telemetrie.unlink(missing_ok=True)
-        commande, args, env = bots.lancement(participant.bot, env_projet, journal_telemetrie)
-        participant.client = ClientAcp(
-            lambda message, p=participant: self.sur_notification(p, message),
-            lambda params, p=participant: self.sur_autorisation(p, params),
-            lambda params, p=participant: self.sur_ecriture(p, params),
+            # Strictly before the launch: deleting the file afterwards would leave the agent
+            # writing into a removed inode, and no output would ever come back.
+            telemetry_log.parent.mkdir(parents=True, exist_ok=True)
+            telemetry_log.unlink(missing_ok=True)
+        command, args, env = bots.launch(participant.bot, project_env, telemetry_log)
+        participant.client = AcpClient(
+            lambda message, p=participant: self.agent_notification(p, message),
+            lambda params, p=participant: self.ask_permission(p, params),
+            lambda params, p=participant: self.agent_write(p, params),
         )
-        journal = atelier / f"{participant.nom}.stderr.log"
+        log = workshop / f"{participant.name}.stderr.log"
         try:
-            await participant.client.demarrer(commande, args, env, participant.dossier, journal)
-            capacites = await participant.client.initialiser()
-            participant.demarrage = "session"
-            await self.ouvrir_session(participant, capacites)
-        except (OSError, AcpErreur) as erreur:
-            participant.etat = "echec"
-            participant.demarrage = "échec"
-            await self.ajouter(
-                self.ligne(f"✕ @{participant.nom} n'a pas pu démarrer — {erreur}", ROUGE)
+            await participant.client.start(command, args, env, participant.folder, log)
+            capabilities = await participant.client.initialize()
+            participant.startup = "session"
+            await self.open_session(participant, capabilities)
+        except (OSError, AcpError) as error:
+            participant.state = "failed"
+            participant.startup = "failed"
+            await self.add(
+                self.notice(f"✕ @{participant.name} could not start — {error}", RED)
             )
             return
-        participant.etat = "repos"
-        participant.derniere_activite = time.monotonic()
-        self.ouvrir_la_saisie()
-        if journal_telemetrie is not None:
-            participant.journal = SortiesGemini(
-                journal_telemetrie,
-                lambda identifiant, sortie, p=participant: self.sur_sortie(p, identifiant, sortie),
+        participant.state = "idle"
+        participant.last_activity = time.monotonic()
+        self.focus_input()
+        if telemetry_log is not None:
+            participant.outputs = GeminiOutputs(
+                telemetry_log,
+                lambda call_id, output, p=participant: self.tool_output(p, call_id, output),
             )
-            participant.journal.demarrer()
+            participant.outputs.start()
 
-    async def ouvrir_session(self, participant: Participant, capacites: dict) -> None:
-        """Reprend la session du bot si elle existe encore, sinon en ouvre une neuve.
+    async def open_session(self, participant: Participant, capabilities: dict) -> None:
+        """Resumes the bot's session if it still exists, otherwise opens a fresh one.
 
-        `session/load` rejoue tout l'historique en notifications : le contexte privé du bot
-        se reconstruit sans rien envoyer. Si la session a expiré, on repart à zéro et le fil
-        le dit — c'est l'état S10.
+        `session/load` replays the whole history as notifications: the bot's private
+        context rebuilds itself without sending anything. If the session expired, we start
+        over and the thread says so — that is state S10.
         """
-        ancienne = self.etat_salle["sessions"].get(participant.nom)
-        sait_charger = bool((capacites.get("agentCapabilities") or {}).get("loadSession"))
-        if ancienne and sait_charger:
+        previous = self.room_state["sessions"].get(participant.name)
+        can_load = bool((capabilities.get("agentCapabilities") or {}).get("loadSession"))
+        if previous and can_load:
             try:
-                # Un agent qui ignore session/load laisserait la salle fermée pour toujours.
-                reprise = await asyncio.wait_for(
-                    participant.client.charger_session(ancienne, participant.dossier), ATTENTE_REPRISE
+                # An agent that ignores session/load would leave the room shut forever.
+                resumed = await asyncio.wait_for(
+                    participant.client.load_session(previous, participant.folder), RESUME_TIMEOUT
                 )
-                participant.session = {"sessionId": ancienne, **(reprise or {})}
-                participant.vu = int(self.etat_salle["vu"].get(participant.nom, 0))
-                participant.demarrage = "repris"
+                participant.session = {"sessionId": previous, **(resumed or {})}
+                participant.seen = int(self.room_state["seen"].get(participant.name, 0))
+                participant.startup = "resumed"
                 return
-            except (AcpErreur, asyncio.TimeoutError):
-                participant.memoire_expiree = True
+            except (AcpError, asyncio.TimeoutError):
+                participant.memory_lost = True
 
-        participant.session = await participant.client.nouvelle_session(participant.dossier)
-        participant.vu = 0
-        participant.demarrage = "neuf"
-        self.etat_salle["sessions"][participant.nom] = participant.session["sessionId"]
-        self.etat_salle["vu"][participant.nom] = 0
-        ecrire_etat(self.salle, self.etat_salle)
+        participant.session = await participant.client.new_session(participant.folder)
+        participant.seen = 0
+        participant.startup = "fresh"
+        self.room_state["sessions"][participant.name] = participant.session["sessionId"]
+        self.room_state["seen"][participant.name] = 0
+        write_state(self.room, self.room_state)
 
-    async def assurer_pret(self, participant: Participant) -> bool:
-        """Réveille un bot évincé avant son tour ; ne fait rien s'il est déjà là."""
-        if participant.pret:
+    async def ensure_ready(self, participant: Participant) -> bool:
+        """Wakes an evicted bot before its turn; does nothing if it is already there."""
+        if participant.ready:
             return True
         if participant.client is not None:
-            await participant.client.fermer()
+            await participant.client.close()
         participant.client = None
         participant.session = {}
-        await self.demarrer(participant)
-        return participant.pret
+        await self.start_bot(participant)
+        return participant.ready
 
-    def evincer_inactifs(self) -> None:
-        """Un bot inactif rend sa mémoire vive ; sa session reste sur disque."""
-        seuil = self.salle.eviction_minutes * 60
+    def evict_idle(self) -> None:
+        """An idle bot gives back its live memory; its session stays on disk."""
+        threshold = self.room.evict_minutes * 60
         for participant in self.participants.values():
-            occupe = participant.tour is not None and not participant.tour.done()
-            if occupe or not participant.pret or not participant.derniere_activite:
+            busy = participant.turn is not None and not participant.turn.done()
+            if busy or not participant.ready or not participant.last_activity:
                 continue
-            if time.monotonic() - participant.derniere_activite > seuil:
-                self.run_worker(self.evincer(participant))
+            if time.monotonic() - participant.last_activity > threshold:
+                self.run_worker(self.evict(participant))
 
-    async def evincer(self, participant: Participant) -> None:
-        if participant.journal is not None:
-            participant.journal.arreter()
-            participant.journal = None
+    async def evict(self, participant: Participant) -> None:
+        if participant.outputs is not None:
+            participant.outputs.stop()
+            participant.outputs = None
         if participant.client is not None:
-            await participant.client.fermer()
+            await participant.client.close()
         participant.client = None
         participant.session = {}
-        participant.etat = "horsjeu"
-        participant.demarrage = "évincé"
-        await self.ajouter(
-            self.ligne(f"◌ @{participant.nom} évincé — son prochain tour le réveille", N["faible"])
+        participant.state = "out"
+        participant.startup = "evicted"
+        await self.add(
+            self.notice(f"◌ @{participant.name} evicted — its next turn wakes it up", N["faint"])
         )
 
-    def trancher_expiration(self, choix: int, noms: list[str]) -> None:
-        """Les trois issues de S10 : repartir du fil, le faire résumer, ou l'archiver."""
-        if choix == 1:
-            self.bandeau_court("· les bots repartent du fil complet")
-        elif choix == 2:
-            self.conversation = asyncio.create_task(self.faire_resumer(noms))
-        elif choix == 3:
-            self.run_worker(self.archiver_le_fil())
+    def settle_expiry(self, choice: int, names: list[str]) -> None:
+        """The three ways out of S10: start from the thread, have it summarised, or archive it."""
+        if choice == 1:
+            self.status_note("· the bots start again from the whole thread")
+        elif choice == 2:
+            self.conversation = asyncio.create_task(self.ask_summary(names))
+        elif choice == 3:
+            self.run_worker(self.archive_thread())
 
-    async def faire_resumer(self, noms: list[str]) -> None:
-        """Un résumé écrit par les bots eux-mêmes, puis le fil repart de là."""
-        cibles = [self.participants[n] for n in noms if self.participants[n].pret]
-        if not cibles:
+    async def ask_summary(self, names: list[str]) -> None:
+        """A summary written by the bots themselves, then the thread starts again from there."""
+        targets = [self.participants[n] for n in names if self.participants[n].ready]
+        if not targets:
             return
-        for participant in cibles:
-            participant.bulle = self.nouvelle_bulle(participant)
-            await self.ajouter(participant.bulle)
-        texte = resume_du_fil(self.transcript.entrees)
-        for participant in cibles:
-            participant.tour = asyncio.create_task(self.parler(participant, texte))
-        await asyncio.gather(*(p.tour for p in cibles), return_exceptions=True)
+        for participant in targets:
+            participant.bubble = self.new_bubble(participant)
+            await self.add(participant.bubble)
+        text = thread_summary(self.transcript.entries)
+        for participant in targets:
+            participant.turn = asyncio.create_task(self.speak(participant, text))
+        await asyncio.gather(*(p.turn for p in targets), return_exceptions=True)
 
-    async def archiver_le_fil(self) -> None:
-        cible = archiver(self.salle)
-        self.transcript = Transcript(self.salle.racine / "transcript.jsonl")
-        self.etat_salle = lire_etat(self.salle)
+    async def archive_thread(self) -> None:
+        target = archive(self.room)
+        self.transcript = Transcript(self.room.root / "transcript.jsonl")
+        self.room_state = read_state(self.room)
         for participant in self.participants.values():
-            participant.vu = 0
-            participant.memoire_expiree = False
-        await self.ajouter(
-            self.ligne(f"· fil archivé dans {cible.name if cible else '—'}", N["faible"])
+            participant.seen = 0
+            participant.memory_lost = False
+        await self.add(
+            self.notice(f"· thread archived in {target.name if target else '—'}", N["faint"])
         )
 
-    def sur_sortie(self, participant: Participant, identifiant: str, sortie: str) -> None:
-        """Raccorde une sortie du journal à la ligne d'outil qui l'attend."""
-        for bulle in reversed(participant.bulles[-5:]):
-            for outil in bulle.outils:
-                if identifiant_court(str(outil["id"])) == identifiant and outil["sortie"] is None:
-                    outil["sortie"] = sortie
-                    outil["arrivee"] = time.monotonic()
-                    outil["attend_sortie"] = False
-                    outil["sortie_perdue"] = False  # elle a fini par venir : on se dédit
-                    if not outil["fin"]:
-                        outil["fin"] = outil["arrivee"]
-                    bulle.rafraichir()
+    def tool_output(self, participant: Participant, call_id: str, output: str) -> None:
+        """Links an output from the log to the tool line waiting for it."""
+        for bubble in reversed(participant.bubbles[-5:]):
+            for tool in bubble.tools:
+                if short_id(str(tool["id"])) == call_id and tool["output"] is None:
+                    tool["output"] = output
+                    tool["arrival"] = time.monotonic()
+                    tool["awaiting_output"] = False
+                    tool["output_lost"] = False  # it came in the end: we take it back
+                    if not tool["end"]:
+                        tool["end"] = tool["arrival"]
+                    bubble.redraw()
                     return
 
-    def sur_notification(self, participant: Participant, message: dict) -> None:
-        """Appelé depuis la boucle de lecture d'un agent : rapide, et rien qui attende."""
-        if message.get("method") != "session/update" or participant.bulle is None:
+    def agent_notification(self, participant: Participant, message: dict) -> None:
+        """Called from an agent's read loop: fast, and nothing that waits."""
+        if message.get("method") != "session/update" or participant.bubble is None:
             return
         params = message.get("params") or {}
-        maj = params.get("update", params)
-        genre = maj.get("sessionUpdate")
-        bulle = participant.bulle
+        update = params.get("update", params)
+        kind = update.get("sessionUpdate")
+        bubble = participant.bubble
 
-        if genre == "agent_thought_chunk":
-            participant.etat = bulle.etat = "pense"
-            self.noter_pensee(participant, (maj.get("content") or {}).get("text", ""))
-        elif genre == "agent_message_chunk":
-            participant.etat = bulle.etat = "pense"
-            bulle.corps += (maj.get("content") or {}).get("text", "")
-        elif genre == "tool_call":
-            participant.etat = bulle.etat = "execute"
-            genre_outil = str(maj.get("kind", "other"))
-            bulle.outils.append({
-                "id": maj.get("toolCallId"),
-                "famille": FAMILLES.get(genre_outil, "outil"),
-                "titre": maj.get("title") or genre_outil,
-                "debut": time.monotonic(),
-                "fin": None,
-                "sortie": None,
-                "attend_sortie": False,
-                "sortie_perdue": False,
+        if kind == "agent_thought_chunk":
+            participant.state = bubble.state = "thinking"
+            self.note_thought(participant, (update.get("content") or {}).get("text", ""))
+        elif kind == "agent_message_chunk":
+            participant.state = bubble.state = "thinking"
+            bubble.body += (update.get("content") or {}).get("text", "")
+        elif kind == "tool_call":
+            participant.state = bubble.state = "running"
+            tool_kind = str(update.get("kind", "other"))
+            bubble.tools.append({
+                "id": update.get("toolCallId"),
+                "family": FAMILIES.get(tool_kind, "tool"),
+                "title": update.get("title") or tool_kind,
+                "start": time.monotonic(),
+                "end": None,
+                "output": None,
+                "awaiting_output": False,
+                "output_lost": False,
             })
-            self.noter_fichiers(participant, genre_outil, maj.get("locations") or [])
-            participant.chrono.append(
-                (time.monotonic() - participant.debut_tour, maj.get("title") or genre_outil)
+            self.note_files(participant, tool_kind, update.get("locations") or [])
+            participant.timeline.append(
+                (time.monotonic() - participant.turn_start, update.get("title") or tool_kind)
             )
-        elif genre == "tool_call_update":
-            self.noter_fichiers(participant, str(maj.get("kind", "other")), maj.get("locations") or [])
-            for outil in bulle.outils:
-                fini = maj.get("status") in ("completed", "failed")
-                if outil["id"] == maj.get("toolCallId") and fini and not outil["fin"]:
-                    outil["fin"] = time.monotonic()
-                    outil["attend_sortie"] = participant.journal is not None
-            if all(o["fin"] for o in bulle.outils):
-                participant.etat = bulle.etat = "pense"
-        bulle.rafraichir()
+        elif kind == "tool_call_update":
+            self.note_files(participant, str(update.get("kind", "other")), update.get("locations") or [])
+            for tool in bubble.tools:
+                done = update.get("status") in ("completed", "failed")
+                if tool["id"] == update.get("toolCallId") and done and not tool["end"]:
+                    tool["end"] = time.monotonic()
+                    tool["awaiting_output"] = participant.outputs is not None
+            if all(t["end"] for t in bubble.tools):
+                participant.state = bubble.state = "thinking"
+        bubble.redraw()
 
-    def noter_pensee(self, participant: Participant, texte: str) -> None:
-        """Les jalons s'empilent ; un bloc sans titre prolonge le corps du jalon en cours."""
-        bulle = participant.bulle
-        assert bulle is not None
-        suite, nouveaux = decouper_pensee(texte)
-        if suite and bulle.jalons:
-            bulle.jalons[-1]["corps"] += ("\n" if bulle.jalons[-1]["corps"] else "") + suite
-        for titre, corps in nouveaux:
-            bulle.jalons.append({"titre": titre, "corps": corps,
-                                 "t": time.monotonic() - participant.debut_tour})
-            participant.chrono.append((bulle.jalons[-1]["t"], f"pense · {titre}"))
+    def note_thought(self, participant: Participant, text: str) -> None:
+        """Steps stack up; a block without a title extends the body of the current step."""
+        bubble = participant.bubble
+        assert bubble is not None
+        rest, fresh = split_thought(text)
+        if rest and bubble.steps:
+            bubble.steps[-1]["body"] += ("\n" if bubble.steps[-1]["body"] else "") + rest
+        for title, body in fresh:
+            bubble.steps.append({"title": title, "body": body,
+                                 "t": time.monotonic() - participant.turn_start})
+            participant.timeline.append((bubble.steps[-1]["t"], f"thinking · {title}"))
 
-    def noter_fichiers(self, participant: Participant, genre: str, endroits: list[dict]) -> None:
-        """`locations` est rempli pour les lectures et les écritures : le panneau reste à jour."""
-        action = {"read": "lu", "edit": "modifié", "delete": "supprimé", "move": "déplacé"}
-        for endroit in endroits:
-            chemin = endroit.get("path")
-            if chemin:
-                participant.fichiers[chemin] = action.get(genre, genre)
+    def note_files(self, participant: Participant, kind: str, locations: list[dict]) -> None:
+        """`locations` is filled for reads and writes: the panel stays up to date."""
+        action = {"read": "read", "edit": "changed", "delete": "deleted", "move": "moved"}
+        for location in locations:
+            path = location.get("path")
+            if path:
+                participant.files[path] = action.get(kind, kind)
 
-    async def sur_ecriture(self, participant: Participant, params: dict) -> None:
-        """Garde-fou : une écriture hors du dossier de la salle passe par une autorisation.
+    async def agent_write(self, participant: Participant, params: dict) -> None:
+        """Guard: a write outside the room folder goes through a permission request.
 
-        L'agent demande au client d'écrire ; sans ce contrôle, il écrit n'importe où sur le
-        disque sans que rien ne remonte. Le réglage peut l'ôter, mais il est posé par défaut.
+        The agent asks the client to write; without this check, it writes anywhere on the
+        disk with nothing coming back. The setting can remove it, but it is on by default.
         """
-        chemin = Path(params["path"]).resolve()
-        racine = (participant.dossier or self.salle.dossier).resolve()
-        dehors = not chemin.is_relative_to(racine)
-        if dehors and self.reglages.get("demander_hors_dossier", True):
-            issue = await self.sur_autorisation(participant, {
-                "toolCall": {"title": f"écrire hors du dossier de la salle : {chemin}"},
+        path = Path(params["path"]).resolve()
+        root = (participant.folder or self.room.folder).resolve()
+        outside = not path.is_relative_to(root)
+        if outside and self.settings.get("ask_outside_folder", True):
+            answer = await self.ask_permission(participant, {
+                "toolCall": {"title": f"write outside the room folder: {path}"},
                 "options": [
-                    {"optionId": "oui", "name": "Écrire ce fichier", "kind": "allow_once"},
-                    {"optionId": "non", "name": "Refuser", "kind": "reject_once"},
+                    {"optionId": "yes", "name": "Write this file", "kind": "allow_once"},
+                    {"optionId": "no", "name": "Refuse", "kind": "reject_once"},
                 ],
             })
-            if issue.get("optionId") != "oui":
-                raise AcpErreur("écriture hors du dossier refusée par l'utilisateur")
-        ecrire_fichier(params)
+            if answer.get("optionId") != "yes":
+                raise AcpError("write outside the folder refused by the user")
+        write_file(params)
 
-    async def sur_autorisation(self, participant: Participant, params: dict) -> dict:
-        """Monte le panneau et attend la décision — aussi longtemps qu'il faut.
+    async def ask_permission(self, participant: Participant, params: dict) -> dict:
+        """Mounts the panel and waits for the decision — as long as it takes.
 
-        Au plus une demande en attente par bot ; plusieurs bots peuvent en avoir chacun une.
-        Le panneau ne prend le focus que si aucun autre n'est en cours de décision.
+        At most one pending request per bot; several bots may each have one. The panel only
+        takes the focus if no other one is being decided.
         """
-        participant.etat = "demande"
-        if participant.bulle is not None:
-            participant.bulle.etat = "demande"
-            participant.bulle.rafraichir()
-        reponse = asyncio.get_running_loop().create_future()
-        panneau = PanneauAutorisation(participant, params, reponse)
-        participant.panneau = panneau
-        await self.ajouter(panneau)
+        participant.state = "asking"
+        if participant.bubble is not None:
+            participant.bubble.state = "asking"
+            participant.bubble.redraw()
+        answer = asyncio.get_running_loop().create_future()
+        panel = PermissionPanel(participant, params, answer)
+        participant.panel = panel
+        await self.add(panel)
         if not any(
-            p.panneau is not None and p.panneau.has_focus for p in self.participants.values()
+            p.panel is not None and p.panel.has_focus for p in self.participants.values()
         ):
-            panneau.focus()
+            panel.focus()
         try:
-            return await reponse
+            return await answer
         finally:
-            participant.panneau = None
+            participant.panel = None
 
-    # ── tours ───────────────────────────────────────────────────────────────────────
+    # ── turns ───────────────────────────────────────────────────────────────────────
 
-    async def on_input_submitted(self, evenement: Input.Submitted) -> None:
-        if evenement.input.id != "message":
+    async def on_input_submitted(self, event: Input.Submitted) -> None:
+        if event.input.id != "message":
             return
-        texte = evenement.value.strip()
-        if not texte:
+        text = event.value.strip()
+        if not text:
             return
-        joignables = [p for p in self.participants.values() if p.etat != "echec"]
-        if not joignables:
-            self.bandeau_court("aucun bot joignable")
+        reachable = [p for p in self.participants.values() if p.state != "failed"]
+        if not reachable:
+            self.status_note("no bot reachable")
             return
-        evenement.input.value = ""
-        self.transcript.ajouter("utilisateur", "toi", texte)
-        await self.ajouter(self.bulle_passee(self.transcript.entrees[-1]))
+        event.input.value = ""
+        self.transcript.add("user", "you", text)
+        await self.add(self.past_bubble(self.transcript.entries[-1]))
 
-        noms = [q.nom for q in joignables]
-        vises = destinataires(texte, noms)
-        spontane = vises == noms and "@" not in texte
-        cibles = [
-            p for p in joignables
-            if p.nom in vises and (not spontane or p.bot.parle_sans_etre_appele)
+        names = [q.name for q in reachable]
+        targeted = recipients(text, names)
+        spontaneous = targeted == names and "@" not in text
+        targets = [
+            p for p in reachable
+            if p.name in targeted and (not spontaneous or p.bot.speaks_unprompted)
         ]
-        occupes = [p for p in cibles if p.tour is not None and not p.tour.done()]
-        if occupes:
-            self.bandeau_court(
-                "· " + ", ".join(f"@{p.nom}" for p in occupes)
-                + " travaille encore — le message est dans le fil, il le verra"
+        busy = [p for p in targets if p.turn is not None and not p.turn.done()]
+        if busy:
+            self.status_note(
+                "· " + ", ".join(f"@{p.name}" for p in busy)
+                + " is still working — the message is in the thread, it will see it"
             )
-            cibles = [p for p in cibles if p not in occupes]
-        if cibles:
-            self.debut_tour = time.monotonic()
-            self.interrompu = False
-            self.conversation = asyncio.create_task(self.mener(cibles))
+            targets = [p for p in targets if p not in busy]
+        if targets:
+            self.turn_start = time.monotonic()
+            self.interrupted = False
+            self.conversation = asyncio.create_task(self.lead(targets))
 
-    def bandeau_court(self, texte: str) -> None:
-        bandeaux = self.query("#bandeau")
-        if bandeaux:
-            bandeaux.first(Static).update(Text(f"  {texte}", style=N["dim"]))
+    def status_note(self, text: str) -> None:
+        bars = self.query("#status")
+        if bars:
+            bars.first(Static).update(Text(f"  {text}", style=N["dim"]))
 
     # ── rounds ──────────────────────────────────────────────────────────────────────
 
-    async def mener(self, cibles: list[Participant]) -> None:
-        """Un round par vague : parallèle dedans, séquentiel entre les vagues, et borné.
+    async def lead(self, targets: list[Participant]) -> None:
+        """One round per wave: parallel inside, sequential between waves, and bounded.
 
-        Le budget de la salle est la vraie limite ; la coupure sur radotage n'est qu'un
-        garde-fou de confort.
+        The room's budget is the real limit; cutting on repetition is only a comfort guard.
         """
-        await self.jouer_round(cibles)
-        for enchainement in range(self.salle.max_rounds):
-            if self.interrompu:
+        await self.play_round(targets)
+        for chain in range(self.room.max_rounds):
+            if self.interrupted:
                 return
-            if self.salle.couper_si_repetition:
-                radoteurs = [p.nom for p in cibles if p.radote]
-                if radoteurs:
-                    await self.ajouter(
-                        self.ligne("↳ " + ", ".join(f"@{n}" for n in radoteurs)
-                                   + " se répète — round coupé", ATTENTION)
+            if self.room.stop_on_repeat:
+                repeaters = [p.name for p in targets if p.repeats]
+                if repeaters:
+                    await self.add(
+                        self.notice("↳ " + ", ".join(f"@{n}" for n in repeaters)
+                                    + " repeats itself — round cut", ATTENTION)
                     )
                     return
-            suivants = self.suite(cibles)
-            if not suivants:
+            following = self.next_wave(targets)
+            if not following:
                 return
-            await self.ajouter(
-                self.ligne(
-                    f"↳ round {enchainement + 2} · " + ", ".join(f"@{p.nom}" for p in suivants),
-                    N["faible"],
+            await self.add(
+                self.notice(
+                    f"↳ round {chain + 2} · " + ", ".join(f"@{p.name}" for p in following),
+                    N["faint"],
                 )
             )
-            cibles = suivants
-            await self.jouer_round(cibles)
-        if self.suite(cibles):
-            await self.ajouter(
-                self.ligne(
-                    f"↳ budget d'enchaînement épuisé ({self.salle.max_rounds}) — à toi la main",
+            targets = following
+            await self.play_round(targets)
+        if self.next_wave(targets):
+            await self.add(
+                self.notice(
+                    f"↳ chaining budget spent ({self.room.max_rounds}) — your call now",
                     ATTENTION,
                 )
             )
 
-    def suite(self, precedents: list[Participant]) -> list[Participant]:
-        """Les bots interpellés par ceux qui viennent de parler, et qui peuvent répondre."""
-        vises: list[Participant] = []
-        membres = [p.nom for p in self.participants.values()]
-        for parlant in precedents:
-            if parlant.bulle is None or not parlant.bot.peut_interpeller:
+    def next_wave(self, previous: list[Participant]) -> list[Participant]:
+        """The bots called out by those who just spoke, and that are able to answer."""
+        targeted: list[Participant] = []
+        members = [p.name for p in self.participants.values()]
+        for speaker in previous:
+            if speaker.bubble is None or not speaker.bot.can_mention:
                 continue
-            for nom in relances(parlant.bulle.corps, membres, sauf=parlant.nom):
-                candidat = self.participants[nom]
-                if candidat.etat != "echec" and candidat not in vises:
-                    vises.append(candidat)
-        return vises
+            for name in handoffs(speaker.bubble.body, members, except_for=speaker.name):
+                candidate = self.participants[name]
+                if candidate.state != "failed" and candidate not in targeted:
+                    targeted.append(candidate)
+        return targeted
 
-    async def jouer_round(self, cibles: list[Participant]) -> None:
-        """Les bots d'une même vague répondent en parallèle, chacun dans son bloc."""
-        for participant in cibles:
-            participant.bulle = self.nouvelle_bulle(participant)
-            await self.ajouter(participant.bulle)
-        for participant in cibles:
-            participant.tour = asyncio.create_task(self.parler(participant))
-        await asyncio.gather(*(p.tour for p in cibles), return_exceptions=True)
+    async def play_round(self, targets: list[Participant]) -> None:
+        """The bots of one wave answer in parallel, each in its own block."""
+        for participant in targets:
+            participant.bubble = self.new_bubble(participant)
+            await self.add(participant.bubble)
+        for participant in targets:
+            participant.turn = asyncio.create_task(self.speak(participant))
+        await asyncio.gather(*(p.turn for p in targets), return_exceptions=True)
 
-    def nouvelle_bulle(self, participant: Participant) -> Bulle:
-        participant.etat = "pense"
-        participant.debut_tour = time.monotonic()
-        participant.chrono = []
-        bulle = Bulle(
-            f"@{participant.nom}",
+    def new_bubble(self, participant: Participant) -> Bubble:
+        participant.state = "thinking"
+        participant.turn_start = time.monotonic()
+        participant.timeline = []
+        bubble = Bubble(
+            f"@{participant.name}",
             participant.bot.role,
-            participant.couleur,
+            participant.color,
             time.strftime("%H:%M"),
-            etat="pense",
-            debut=time.monotonic(),
+            state="thinking",
+            start=time.monotonic(),
         )
-        bulle.proprietaire = participant.nom
-        participant.bulles.append(bulle)
-        bulle.raisonnement_visible = participant.bot.raisonnement_visible
-        bulle.raisonnement = self.reglages.get("raisonnement", "replié")
-        return bulle
+        bubble.owner = participant.name
+        participant.bubbles.append(bubble)
+        bubble.thinking_visible = participant.bot.thinking_visible
+        bubble.thinking = self.settings.get("thinking", "folded")
+        return bubble
 
-    async def parler(self, participant: Participant, impose: str | None = None) -> None:
-        """Un tour, et le rebond du refus : le refus n'arrête pas le bot, il l'oriente."""
-        if not await self.assurer_pret(participant):
-            await self.echouer(participant, "n'a pas pu être relancé")
+    async def speak(self, participant: Participant, forced: str | None = None) -> None:
+        """One turn, and the refusal bounce: a refusal does not stop the bot, it steers it."""
+        if not await self.ensure_ready(participant):
+            await self.fail(participant, "could not be relaunched")
             return
-        texte = impose or prompt_pour(participant.nom, self.transcript.entrees, participant.vu)
+        text = forced or prompt_for(participant.name, self.transcript.entries, participant.seen)
         while True:
-            participant.vu = len(self.transcript.entrees)
-            bulle = participant.bulle
-            assert bulle is not None and participant.client is not None
+            participant.seen = len(self.transcript.entries)
+            bubble = participant.bubble
+            assert bubble is not None and participant.client is not None
             try:
-                resultat = await participant.client.prompt(participant.session["sessionId"], texte)
-            except AcpErreur as erreur:
-                await self.echouer(participant, str(erreur))
+                result = await participant.client.prompt(participant.session["sessionId"], text)
+            except AcpError as error:
+                await self.fail(participant, str(error))
                 return
-            arret = resultat.get("stopReason", "")
-            participant.etat = bulle.etat = "horsjeu" if arret == "cancelled" else "fini"
-            bulle.rafraichir()
-            if bulle.corps.strip():
-                self.transcript.ajouter(
-                    "bot", participant.nom, bulle.corps.strip(), bulle.titres_outils()
+            stop = result.get("stopReason", "")
+            participant.state = bubble.state = "out" if stop == "cancelled" else "done"
+            bubble.redraw()
+            if bubble.body.strip():
+                self.transcript.add(
+                    "bot", participant.name, bubble.body.strip(), bubble.tool_titles()
                 )
-                participant.empreintes.append(empreinte(bulle.corps))
-            participant.vu = len(self.transcript.entrees)
-            participant.derniere_activite = time.monotonic()
-            self.etat_salle["vu"][participant.nom] = participant.vu
-            ecrire_etat(self.salle, self.etat_salle)
+                participant.fingerprints.append(fingerprint(bubble.body))
+            participant.seen = len(self.transcript.entries)
+            participant.last_activity = time.monotonic()
+            self.room_state["seen"][participant.name] = participant.seen
+            write_state(self.room, self.room_state)
 
-            # Le chemin qui marche : le tour se termine proprement, puis le commentaire part
-            # en prompt. Pas de rebond après une annulation.
-            if bulle.outils:
-                asyncio.create_task(self.clore_sorties(bulle))
-            if participant.refus is None or arret == "cancelled":
+            # The path that works: the turn ends cleanly, then the comment leaves as a
+            # prompt. No bounce after a cancellation.
+            if bubble.tools:
+                asyncio.create_task(self.close_outputs(bubble))
+            if participant.refusal is None or stop == "cancelled":
                 return
-            texte = f"[refus de l'utilisateur] {participant.refus}"
-            participant.refus = None
-            participant.bulle = self.nouvelle_bulle(participant)
-            await self.ajouter(participant.bulle)
+            text = f"[refusal from the user] {participant.refusal}"
+            participant.refusal = None
+            participant.bubble = self.new_bubble(participant)
+            await self.add(participant.bubble)
 
-    async def clore_sorties(self, bulle: Bulle) -> None:
-        """Une sortie arrive avec la requête modèle suivante : s'il n'y en a pas, elle ne
-        viendra jamais. Passé le délai de grâce, on l'annonce au lieu d'animer dans le vide."""
+    async def close_outputs(self, bubble: Bubble) -> None:
+        """An output arrives with the next model request: if there is none, it will never
+        come. Past the grace delay, we announce it instead of animating into the void."""
         await asyncio.sleep(telemetry.GRACE)
-        change = False
-        for outil in bulle.outils:
-            if outil.get("attend_sortie") and outil["sortie"] is None:
-                outil["attend_sortie"] = False
-                outil["sortie_perdue"] = True
-                change = True
-        if change:
-            bulle.rafraichir()
+        changed = False
+        for tool in bubble.tools:
+            if tool.get("awaiting_output") and tool["output"] is None:
+                tool["awaiting_output"] = False
+                tool["output_lost"] = True
+                changed = True
+        if changed:
+            bubble.redraw()
 
-    async def echouer(self, participant: Participant, message: str) -> None:
-        """Un échec tient sur une ligne, jamais en fenêtre modale — et la salle continue."""
-        participant.etat = "echec"
-        if participant.bulle is not None:
-            participant.bulle.etat = "echec"
-            participant.bulle.rafraichir()
-        await self.ajouter(self.ligne(f"✕ @{participant.nom} — {message}", ROUGE))
-        await self.ajouter(self.ligne("les autres bots continuent", N["faible"]))
+    async def fail(self, participant: Participant, message: str) -> None:
+        """A failure fits on one line, never in a modal — and the room carries on."""
+        participant.state = "failed"
+        if participant.bubble is not None:
+            participant.bubble.state = "failed"
+            participant.bubble.redraw()
+        await self.add(self.notice(f"✕ @{participant.name} — {message}", RED))
+        await self.add(self.notice("the other bots carry on", N["faint"]))
 
-    # ── refus commenté ──────────────────────────────────────────────────────────────
+    # ── commented refusal ───────────────────────────────────────────────────────────
 
-    def ouvrir_refus(self, panneau: PanneauAutorisation, option: dict) -> None:
-        """Ouvre la zone de commentaire juste sous le panneau, comme le montre S9."""
-        self.query_one("#fil", VerticalScroll).mount(ZoneRefus(panneau, option), after=panneau)
+    def open_refusal(self, panel: PermissionPanel, option: dict) -> None:
+        """Opens the comment box right under the panel, as S9 shows."""
+        self.query_one("#thread", VerticalScroll).mount(RefusalBox(panel, option), after=panel)
 
-    def tracer_refus(self, participant: Participant, commentaire: str) -> None:
-        """Le refus entre dans le fil : sans ça les autres bots ne comprennent pas le virage."""
-        self.transcript.ajouter(
-            "refus", "toi", f"refus de la demande de @{participant.nom} : « {commentaire} »"
+    def log_refusal(self, participant: Participant, comment: str) -> None:
+        """The refusal enters the thread: without it the other bots miss the turn taken."""
+        self.transcript.add(
+            "refusal", "you", f"refused @{participant.name}'s request: « {comment} »"
         )
         self.run_worker(
-            self.ajouter(self.ligne(f"✕ refusé · toi · « {commentaire} »", ROUGE)), exclusive=False
+            self.add(self.notice(f"✕ refused · you · « {comment} »", RED)), exclusive=False
         )
 
-    def action_interrompre(self) -> None:
-        """^C : annuler chaque tour en cours et résoudre les autorisations en vol.
+    def action_interrupt(self) -> None:
+        """^C: cancel every running turn and resolve the in-flight permission requests.
 
-        On n'annule pas la tâche de conversation : elle porte le code qui referme les
-        bulles et conserve ce qui a déjà été dit. On lui demande de s'arrêter après le
-        round en cours, et les tours se terminent d'eux-mêmes sur `stopReason: cancelled`.
+        We do not cancel the conversation task: it carries the code that closes the bubbles
+        and keeps what was already said. We ask it to stop after the current round, and the
+        turns end by themselves on `stopReason: cancelled`.
         """
-        self.interrompu = True
-        coupes = []
+        self.interrupted = True
+        cut = []
         for participant in self.participants.values():
-            if participant.tour is not None and not participant.tour.done():
-                participant.client.annuler(participant.session["sessionId"])
-                coupes.append(participant.nom)
-            if participant.panneau is not None:
-                participant.panneau.abandonner()
-        if coupes:
-            self.transcript.ajouter(
-                "systeme", "toi", "tour interrompu · " + ", ".join(f"@{n}" for n in coupes)
+            if participant.turn is not None and not participant.turn.done():
+                participant.client.cancel(participant.session["sessionId"])
+                cut.append(participant.name)
+            if participant.panel is not None:
+                participant.panel.abandon()
+        if cut:
+            self.transcript.add(
+                "system", "you", "turn interrupted · " + ", ".join(f"@{n}" for n in cut)
             )
 
-    def ouvrir_raisonnement(self, nom: str | None) -> None:
-        if nom in self.participants and self.participants[nom].bot.raisonnement_visible:
-            self.push_screen(EcranRaisonnement(nom))
+    def open_thinking(self, name: str | None) -> None:
+        if name in self.participants and self.participants[name].bot.thinking_visible:
+            self.push_screen(ThinkingScreen(name))
 
-    def modeles_connus(self) -> list[str]:
-        """La liste des modèles vient des sessions ouvertes — jamais d'un nom écrit en dur."""
+    def known_models(self) -> list[str]:
+        """The model list comes from the open sessions — never from a hard-coded name."""
         for participant in self.participants.values():
-            modeles = (participant.session.get("models") or {}).get("availableModels") or []
-            if modeles:
-                return [m.get("modelId", "") for m in modeles if m.get("modelId")]
+            models = (participant.session.get("models") or {}).get("availableModels") or []
+            if models:
+                return [m.get("modelId", "") for m in models if m.get("modelId")]
         return []
 
-    def action_fiche(self) -> None:
-        """La fiche du dernier bot qui a parlé, sinon un bot neuf."""
-        vise = self.dernier_actif()
-        prises = {p.bot.teinte for p in self.participants.values() if p.nom != vise}
+    def action_bot_card(self) -> None:
+        """The card of the last bot that spoke, otherwise a fresh bot."""
+        target = self.last_active()
+        taken = {p.bot.hue for p in self.participants.values() if p.name != target}
         self.push_screen(
-            EcranFicheBot(self.salle.racine.parents[1], vise, self.modeles_connus(), prises),
-            self.fiche_enregistree,
+            BotCard(self.room.root.parents[1], target, self.known_models(), taken),
+            self.bot_saved,
         )
 
-    def fiche_enregistree(self, nom: str | None) -> None:
-        """Un bot modifié est évincé : son prochain tour le relance avec sa nouvelle fiche."""
-        if not nom:
+    def bot_saved(self, name: str | None) -> None:
+        """An edited bot is evicted: its next turn relaunches it with its new card."""
+        if not name:
             return
-        dossier = self.salle.racine.parents[1] / "bots" / nom
-        participant = self.participants.get(nom)
+        folder = self.room.root.parents[1] / "bots" / name
+        participant = self.participants.get(name)
         if participant is None:
             self.run_worker(
-                self.ajouter(self.ligne(f"· @{nom} enregistré — ajoute-le à la salle pour l'entendre",
-                                        N["faible"]))
+                self.add(self.notice(f"· @{name} saved — add it to the room to hear it",
+                                     N["faint"]))
             )
             return
-        participant.bot = bots.charger(dossier)
-        participant.couleur = couleur_bot(participant.bot.teinte)
-        self.run_worker(self.evincer(participant))
+        participant.bot = bots.load(folder)
+        participant.color = bot_color(participant.bot.hue)
+        self.run_worker(self.evict(participant))
 
-    def action_composer(self) -> None:
-        racine = self.salle.racine.parents[1]
+    def action_compose(self) -> None:
+        root = self.room.root.parents[1]
         self.push_screen(
-            EcranSalle(racine, self.salle, bots.charger_tous(racine / "bots")), self.salle_composee
+            RoomScreen(root, self.room, bots.load_all(root / "bots")), self.room_saved
         )
 
-    def salle_composee(self, nom: str | None) -> None:
-        """Le room.toml est écrit ; la composition prend effet à la prochaine ouverture."""
-        if nom:
-            self.run_worker(self.ajouter(self.ligne(
-                f"· salle « {nom} » enregistrée — rouvre-la pour que la composition s'applique",
-                N["faible"],
+    def room_saved(self, name: str | None) -> None:
+        """room.toml is written; the line-up takes effect the next time the room opens."""
+        if name:
+            self.run_worker(self.add(self.notice(
+                f"· room « {name} » saved — reopen it for the line-up to apply",
+                N["faint"],
             )))
 
-    def action_reglages(self) -> None:
-        racine = self.salle.racine.parents[1]
+    def action_settings(self) -> None:
+        root = self.room.root.parents[1]
         self.push_screen(
-            EcranReglages(self.reglages, bots.charger_tous(racine / "bots"), self.modeles_connus()),
-            self.reglages_changes,
+            SettingsScreen(self.settings, bots.load_all(root / "bots"), self.known_models()),
+            self.settings_changed,
         )
 
-    def reglages_changes(self, valeurs: dict | None) -> None:
-        """Ce qui se voit tout de suite s'applique tout de suite."""
-        if not valeurs:
+    def settings_changed(self, values: dict | None) -> None:
+        """What shows right away applies right away."""
+        if not values:
             return
-        self.reglages = valeurs
-        appliquer_theme(self.theme_voulu())
+        self.settings = values
+        apply_theme(self.wanted_theme())
         self.refresh_css()
         for participant in self.participants.values():
-            participant.couleur = couleur_bot(participant.bot.teinte)
-            if participant.bulle is not None:
-                participant.bulle.couleur = participant.couleur
-                participant.bulle.raisonnement = valeurs["raisonnement"]
-                participant.bulle.rafraichir()
-        self.peindre_bandeau()
+            participant.color = bot_color(participant.bot.hue)
+            if participant.bubble is not None:
+                participant.bubble.color = participant.color
+                participant.bubble.thinking = values["thinking"]
+                participant.bubble.redraw()
+        self.paint_status()
 
-    def dernier_actif(self) -> str | None:
-        vivants = [p for p in self.participants.values() if p.bulle is not None]
-        return max(vivants, key=lambda p: p.debut_tour).nom if vivants else None
+    def last_active(self) -> str | None:
+        live = [p for p in self.participants.values() if p.bubble is not None]
+        return max(live, key=lambda p: p.turn_start).name if live else None
 
-    def action_raisonnement(self) -> None:
-        """Le raisonnement du dernier bot qui a parlé."""
-        self.ouvrir_raisonnement(self.dernier_actif())
+    def action_thinking(self) -> None:
+        """The reasoning of the last bot that spoke."""
+        self.open_thinking(self.last_active())
 
-    def action_suivre(self) -> None:
-        self.query_one("#fil", VerticalScroll).scroll_end(animate=False)
-        self.non_lus = 0
+    def action_follow(self) -> None:
+        self.query_one("#thread", VerticalScroll).scroll_end(animate=False)
+        self.unread = 0
 
     async def on_unmount(self) -> None:
-        """En sortant, aucun process ne survit à l'application."""
+        """On the way out, no process outlives the application."""
         for participant in self.participants.values():
-            if participant.journal is not None:
-                participant.journal.arreter()
-        # En parallèle et court : séquentiel à 4 s par bot, on rendait la main au terminal
-        # plusieurs secondes avant de revenir à l'accueil.
+            if participant.outputs is not None:
+                participant.outputs.stop()
+        # In parallel and short: sequentially at 4 s per bot, we were giving the terminal
+        # back several seconds before returning to home.
         await asyncio.gather(*(
-            p.client.fermer(delai_propre=1.0)
+            p.client.close(grace=1.0)
             for p in self.participants.values() if p.client is not None
         ), return_exceptions=True)
 
 
 def main() -> None:
-    """L'accueil, puis une salle, puis l'accueil : ^Q revient, ^Q à l'accueil quitte."""
-    racine = Path(__file__).resolve().parents[1]
-    demande = sys.argv[1] if len(sys.argv) > 1 else None
+    """Home, then a room, then home: ^Q comes back, ^Q at home quits."""
+    root = Path(__file__).resolve().parents[1]
+    asked = sys.argv[1] if len(sys.argv) > 1 else None
     while True:
-        nom = demande or Accueil(racine).run()
-        demande = None
-        if not nom:
+        name = asked or Home(root).run()
+        asked = None
+        if not name:
             return
-        chemin = racine / "rooms" / nom / "room.toml"
-        if not chemin.exists():
-            print(f"aucune salle nommée « {nom} » dans {racine / 'rooms'}")
+        path = root / "rooms" / name / "room.toml"
+        if not path.exists():
+            print(f"no room named « {name} » in {root / 'rooms'}")
             return
-        salle = charger_salle(racine, nom)
-        Quorum(salle, bots.charger_tous(racine / "bots")).run()
+        room = load_room(root, name)
+        Quorum(room, bots.load_all(root / "bots")).run()
 
 
 if __name__ == "__main__":

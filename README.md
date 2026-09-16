@@ -1,133 +1,132 @@
 # Quorum
 
-Une salle, plusieurs agents, un seul fil.
+One room, several agents, a single thread.
 
-Quorum est une application de terminal où l'on discute avec plusieurs agents IA à la fois,
-dans une conversation unique, comme une messagerie d'équipe. Chaque bot a son rôle, son
-modèle, ses outils et ses permissions. Ils travaillent vraiment — ils lisent des fichiers,
-lancent des commandes, appellent des serveurs MCP — et peuvent s'interpeller entre eux avec
-`@nom`. Les demandes d'autorisation remontent à l'utilisateur, qui accepte, refuse, ou
-refuse en expliquant pourquoi.
+Quorum is a terminal application where you talk with several AI agents at once, in a single
+conversation, like a team chat. Each bot has its role, its model, its tools and its
+permissions. They really work — they read files, run commands, call MCP servers — and they
+can call each other out with `@name`. Permission requests come up to the user, who allows,
+refuses, or refuses and explains why.
 
 ```
-◈ atlas / refonte-auth · tour 12                              ◐2 ▸1 ·2
+◈ atlas / auth-rework · turn 12                               ◐2 ▸1 ·2
 
-  ▌ toi · 14:02
-    @sonar regarde comment on valide les tokens, et @audit dis-moi si la
-    rotation des clés est correcte. Ne touchez à rien pour l'instant.
+  ▌ you · 14:02
+    @sonar look at how we validate tokens, and @audit tell me whether key
+    rotation is correct. Do not touch anything for now.
 
-  ▌ @sonar  recherche · 14:02  ◐ pense · 0:18
-    ▸ shell · ls src/auth/                    ✓ 0.2s · sortie +1.4s
+  ▌ @sonar  research · 14:02  ◐ thinking · 0:18
+    ▸ shell · ls src/auth/                    ✓ 0.2s · output +1.4s
         jwt.py  legacy/  tokens.py  __init__.py
-    ▸ fs · lit src/auth/jwt.py                ✓ 0.4s
-    ┊ ouvrir le raisonnement ⏎ · 3 jalons · 2 outils · 0:18
+    ▸ fs · reads src/auth/jwt.py              ✓ 0.4s
+    ┊ Comparing Two Validation Paths
 
-  ◆ @forge demande une autorisation                            ⇥ suivante
+  ◆ @forge asks for permission                              ⇥ next request
     rm -rf .venv && uv sync
     1 ✓  Allow
     2 ✓✓ Allow for this session
     3 ✕  Reject
-    1-9 décider · r refuser en expliquant · esc revenir à la saisie
+    1-9 decide · r refuse with a reason · esc back to typing
 
-◇ écris pendant qu'ils travaillent…▏
-◐@sonar  ◆@forge  ·@audit                    ^C interrompre · 0:18
+◇ type while they work…▏
+◐@sonar  ◆@forge  ·@audit                     ^C interrupt · 0:18
 ```
 
-## Installer
+## Install
 
 ```sh
-git clone <ce dépôt> && cd quorum
+git clone <this repo> && cd quorum
 uv sync
 ```
 
-Il faut au moins un agent qui parle **ACP** (Agent Client Protocol) :
+You need at least one agent that speaks **ACP** (Agent Client Protocol):
 
-| Fournisseur | Commande |
+| Provider | Command |
 |---|---|
 | Gemini CLI | `gemini --acp` |
 | Claude Code | `npx @zed-industries/claude-code-acp` |
 | Codex | `npx @zed-industries/codex-acp` |
 
-Quorum n'est lié à aucun d'eux : un bot déclare simplement la commande à lancer.
+Quorum is tied to none of them: a bot simply declares the command to launch.
 
-## Lancer
+## Run
 
 ```sh
-uv run quorum          # l'accueil : reprendre une salle, en créer une, gérer les bots
-uv run quorum demo     # ouvrir directement une salle
+uv run quorum          # home: resume a room, create one, manage the bots
+uv run quorum demo     # open a room directly
 ```
 
-**Dans l'accueil** — `↑↓` parcourir · `⏎` ouvrir · `n` nouvelle salle · `b` nouveau bot ·
-`,` réglages · `^Q` quitter.
+**At home** — `↑↓` walk · `⏎` open · `n` new room · `b` new bot ·
+`,` settings · `^Q` quit.
 
-**Dans une salle** — `⏎` envoyer · `1`…`9` décider d'une autorisation · `r` refuser en
-expliquant · `^C` interrompre le tour · `^R` voir travailler le dernier bot actif ·
-`^B` sa fiche · `^O` composer la salle · `^G` réglages · `fin` suivre le flux ·
-`^Q` revenir à l'accueil.
+**In a room** — `⏎` send · `1`…`9` decide a permission · `r` refuse with a reason ·
+`^C` interrupt the turn · `^R` watch the last active bot work · `^B` its card ·
+`^O` set up the room · `^G` settings · `end` follow the stream ·
+`^Q` back to home.
 
-**Dans une fiche** — `⇥` champ suivant · `^S` enregistrer · `esc` abandonner. Dans la table
-des permissions : `a` ajouter · `e` modifier le motif · `d` changer la décision · `x`
-retirer · `⇧↑↓` réordonner.
+**In a bot card** — `⇥` next field · `^S` save · `esc` discard. In the permission table:
+`a` add · `e` edit the pattern · `d` change the decision · `x` remove · `⇧↑↓` reorder.
 
-## Un bot est un dossier
+## A bot is a folder
 
 ```
 bots/forge/
-  bot.toml       nom, rôle, teinte, commande, modèle, capacités
-  system.md      son rôle — remplace le prompt système de l'agent
-  policy.toml    ses permissions — première règle qui gagne
-  settings.json  ses réglages — isole le bot des MCP personnels de la machine
+  bot.toml       name, role, hue, command, model, capabilities
+  system.md      its role — replaces the agent's system prompt
+  policy.toml    its permissions — first matching rule wins
+  settings.json  its settings — isolates the bot from the machine's personal MCP servers
 ```
 
-Tout est éditable à la main ; la fiche (`^B`) écrit exactement ces fichiers.
+Everything is editable by hand; the card (`^B`) writes exactly those files.
 
-Ce qui dépend de la machine (certificat d'entreprise, proxy) passe par le bloc `env` du bot
-en `${VARIABLE}`, résolu depuis un `.env` non versionné. Voir `.env.example`.
+Whatever depends on the machine (company certificate, proxy) goes through the bot's `env`
+block as `${VARIABLE}`, resolved from an unversioned `.env`. See `.env.example`.
 
-## Une salle est un dossier
+## A room is a folder
 
 ```
 rooms/demo/
-  room.toml          membres, dossier de travail, budget d'enchaînement — écrit par un humain
-  transcript.jsonl   le fil, source de vérité — non versionné
-  state.json         sessions et index de lecture par bot — écrit par la machine
+  room.toml          members, work folder, chaining budget — written by a human
+  transcript.jsonl   the thread, source of truth — not versioned
+  state.json         sessions and read index per bot — written by the machine
 ```
 
-**Le transcript fait foi.** Les sessions des agents ne sont que leur mémoire privée : une
-salle dont les sessions sont mortes reste lisible, et les bots repartent du fil.
+**The transcript is the source of truth.** The agents' sessions are only their private
+memory: a room whose sessions are dead stays readable, and the bots start again from the
+thread.
 
-## Ce qui est mesuré, et ce qui ne marche pas
+## What is measured, and what does not work
 
-Ces points viennent d'essais sur le vrai protocole, pas de la documentation.
+These points come from trials against the real protocol, not from the documentation.
 
-- **La sortie des commandes n'est pas dans le flux ACP.** Ni elle, ni le contenu des fichiers
-  lus. Pour Gemini, on la récupère dans le journal de télémétrie local — elle arrive **~5 s
-  après** la fin de l'outil, d'un bloc. L'interface tient ce décalage (`✓ 0.6s · sortie en
-  route`) et le dit quand elle ne vient jamais. Sans ce journal, ou chez un autre
-  fournisseur, le fil montre les commandes sans leurs réponses.
-- **`session/load` ne reprend rien avec Gemini CLI 0.59.** L'agent annonce pourtant
-  `loadSession: true`, mais répond « No previous sessions found for this project » : la
-  session n'est jamais écrite sur disque. Le code de reprise est là et testé ; en attendant,
-  c'est le transcript qui porte la mémoire — et ça marche.
-- **Un bot hérite des réglages personnels de la machine.** `settings.json` avec
-  `{"mcp": {"allowed": []}}` coupe les serveurs MCP, et `-e` sans extension valide coupe les
-  extensions. Les serveurs A2A des réglages utilisateur, eux, se chargent encore.
-- **Le décompte de jetons n'existe qu'à la fin d'un tour.** Rien à afficher pendant.
-- **Les pensées des agents arrivent en anglais**, en blocs titrés. Le fil n'en garde que les
-  titres ; le corps s'ouvre dans l'écran de raisonnement.
+- **Command output is not in the ACP stream.** Neither it nor the content of files read.
+  For Gemini, we pick it up from the local telemetry log — it arrives **~5 s after** the
+  tool ends, in one block. The interface holds that delay (`✓ 0.6s · output on the way`)
+  and says so when it never comes. Without that log, or with another provider, the thread
+  shows the commands without their answers.
+- **`session/load` resumes nothing with Gemini CLI 0.59.** The agent does announce
+  `loadSession: true`, but answers "No previous sessions found for this project": the
+  session is never written to disk. The resume code is there and tested; meanwhile, the
+  transcript is what carries the memory — and it works.
+- **A bot inherits the machine's personal settings.** A `settings.json` with
+  `{"mcp": {"allowed": []}}` cuts the MCP servers, and `-e` with no valid extension cuts
+  the extensions. The A2A servers of the user settings, however, still load.
+- **The token count only exists at the end of a turn.** Nothing to show during it.
+- **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
+  titles; the body opens in the reasoning screen.
 
-## Vérifier
+## Verify
 
 ```sh
-./verifier.sh
+./verify.sh
 ```
 
-Douze vérifications, sans réseau ni modèle : un faux agent ACP scripté joue les scénarios
-(autorisation, refus commenté, annulation, rounds, reprise, sorties en décalé). Pas de
-dépendance de test — des `assert` et un `__main__`.
+Twelve checks, with no network and no model: a scripted fake ACP agent plays the scenarios
+(permission, commented refusal, cancellation, rounds, resume, late outputs). No test
+dependency — `assert` statements and a `__main__`.
 
-## Choix
+## Choices
 
-Python et [Textual](https://textual.textualize.io/), gérés par `uv`. Une seule dépendance.
-Pas de base de données : des fichiers. Le client ACP fait environ 250 lignes et ne dépend de
-rien. Tout le français dans l'interface, les identifiants en anglais.
+Python and [Textual](https://textual.textualize.io/), managed with `uv`. A single
+dependency. No database: files. The ACP client is about 250 lines and depends on nothing.
+Everything in English, interface and identifiers alike.

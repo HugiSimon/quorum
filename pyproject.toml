@@ -1,7 +1,7 @@
 [project]
 name = "quorum"
 version = "0.1.0"
-description = "Une salle, plusieurs agents, un seul fil."
+description = "One room, several agents, a single thread."
 requires-python = ">=3.11"
 dependencies = ["textual>=1.0"]
 

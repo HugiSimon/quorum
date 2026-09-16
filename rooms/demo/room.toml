@@ -1,6 +1,6 @@
-nom = "demo"
-dossier = "."          # relatif à la racine du projet
-membres = ["forge", "sonar"]
+name = "demo"
+folder = "."          # relative to the project root
+members = ["forge", "sonar"]
 
-max_rounds = 3         # 0 = les bots ne se répondent jamais
-couper_si_repetition = true
+max_rounds = 3         # 0 = the bots never answer each other
+stop_on_repeat = true

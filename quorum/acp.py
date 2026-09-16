@@ -1,9 +1,8 @@
-"""Client ACP : JSON-RPC 2.0 sur stdio, bidirectionnel.
+"""ACP client: JSON-RPC 2.0 over stdio, both ways.
 
-Trois formes de message et une seule règle de tri : un `id` **et** une `method` est une
-requête de l'agent, un `id` seul est la réponse à l'une des nôtres, ni l'un ni l'autre une
-notification. Les identifiants de l'agent commencent à 0 : on teste toujours `is not None`,
-jamais la véracité de l'id.
+Three message shapes and a single sorting rule: an `id` **and** a `method` is a request
+from the agent, an `id` alone is the answer to one of ours, neither is a notification. The
+agent's ids start at 0: we always test `is not None`, never the truthiness of the id.
 """
 
 from __future__ import annotations
@@ -15,96 +14,96 @@ import signal
 from pathlib import Path
 from typing import Any, Awaitable, Callable
 
-# Un rejeu d'historique (session/load) arrive sur une seule ligne : la limite de 64 Kio
-# d'asyncio est très en dessous du besoin.
-LIMITE_LIGNE = 4 * 1024 * 1024
+# A history replay (session/load) arrives on a single line: asyncio's 64 KiB limit is far
+# below what is needed.
+LINE_LIMIT = 4 * 1024 * 1024
 
 
-class AcpErreur(Exception):
-    """Erreur portée par le champ `error` d'une réponse, ou panne du transport."""
+class AcpError(Exception):
+    """Error carried by the `error` field of a response, or a transport failure."""
 
 
-class ClientAcp:
-    """Un process agent, sa boucle de lecture et ses requêtes en vol.
+class AcpClient:
+    """One agent process, its read loop and its in-flight requests.
 
-    `sur_notification(message)` est appelé **dans** la boucle de lecture : il doit rendre
-    la main tout de suite. `sur_autorisation(params)` est une coroutine qui peut attendre
-    une décision humaine aussi longtemps qu'il faut — elle tourne dans sa propre tâche.
+    `on_notification(message)` is called **inside** the read loop: it must return
+    immediately. `on_permission(params)` is a coroutine that may wait for a human decision
+    as long as needed — it runs in its own task.
     """
 
     def __init__(
         self,
-        sur_notification: Callable[[dict], None],
-        sur_autorisation: Callable[[dict], Awaitable[dict]],
-        sur_ecriture: Callable[[dict], Awaitable[None]] | None = None,
+        on_notification: Callable[[dict], None],
+        on_permission: Callable[[dict], Awaitable[dict]],
+        on_write: Callable[[dict], Awaitable[None]] | None = None,
     ) -> None:
-        self.sur_notification = sur_notification
-        self.sur_autorisation = sur_autorisation
-        # L'agent demande au client d'écrire : c'est une frontière de confiance, pas un
-        # détail de transport. L'application peut s'y interposer.
-        self.sur_ecriture = sur_ecriture
-        self.capacites: dict[str, Any] = {}
+        self.on_notification = on_notification
+        self.on_permission = on_permission
+        # The agent asks the client to write: that is a trust boundary, not a transport
+        # detail. The application can step in there.
+        self.on_write = on_write
+        self.capabilities: dict[str, Any] = {}
         self._proc: asyncio.subprocess.Process | None = None
         self._stderr = None
-        self._lecteur: asyncio.Task | None = None
-        self._dernier_id = 0
-        self._attentes: dict[int, asyncio.Future] = {}
-        self._taches: dict[Any, asyncio.Task] = {}
-        self._autorisations: set[Any] = set()
+        self._reader: asyncio.Task | None = None
+        self._last_id = 0
+        self._pending: dict[int, asyncio.Future] = {}
+        self._tasks: dict[Any, asyncio.Task] = {}
+        self._permissions: set[Any] = set()
 
-    # ── cycle de vie ────────────────────────────────────────────────────────────────
+    # ── life cycle ──────────────────────────────────────────────────────────────────
 
-    async def demarrer(
+    async def start(
         self,
-        commande: str,
+        command: str,
         args: list[str],
         env: dict[str, str],
         cwd: Path,
-        journal_stderr: Path,
+        stderr_log: Path,
     ) -> None:
-        """Lance le process agent, stderr détourné vers un fichier (le terminal est pris)."""
-        journal_stderr.parent.mkdir(parents=True, exist_ok=True)
-        self._stderr = journal_stderr.open("ab", buffering=0)
+        """Launches the agent process, stderr diverted to a file (the terminal is taken)."""
+        stderr_log.parent.mkdir(parents=True, exist_ok=True)
+        self._stderr = stderr_log.open("ab", buffering=0)
         self._proc = await asyncio.create_subprocess_exec(
-            commande,
+            command,
             *args,
             cwd=str(cwd),
             env=env,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=self._stderr,
-            limit=LIMITE_LIGNE,
-            # `gemini --acp` n'est qu'un lanceur : il ouvre un second process node qui lui
-            # survit. Un groupe à part permet de fermer les deux d'un seul geste.
+            limit=LINE_LIMIT,
+            # `gemini --acp` is only a launcher: it opens a second node process that
+            # outlives it. A separate group lets us close both in one gesture.
             start_new_session=True,
         )
-        self._lecteur = asyncio.create_task(self._boucle_lecture())
+        self._reader = asyncio.create_task(self._read_loop())
 
-    async def fermer(self, delai_propre: float = 4.0) -> None:
-        """Termine le process sans laisser d'orphelin — mais en lui laissant sa sortie propre.
+    async def close(self, grace: float = 4.0) -> None:
+        """Ends the process without leaving an orphan — but leaves it a clean exit.
 
-        La fermeture de stdin est le seul « au revoir » du protocole : c'est elle qui permet
-        à l'agent d'enregistrer sa session sur disque, donc à `session/load` de la retrouver
-        au lancement suivant. Un SIGTERM immédiat la perd. Le signal ne vient qu'après.
+        Closing stdin is the protocol's only "goodbye": it is what lets the agent save its
+        session to disk, and therefore lets `session/load` find it on the next launch. An
+        immediate SIGTERM loses it. The signal only comes after.
         """
         if self._proc is not None and self._proc.returncode is None:
             if self._proc.stdin is not None and not self._proc.stdin.is_closing():
                 self._proc.stdin.close()
             try:
-                await asyncio.wait_for(self._proc.wait(), delai_propre)
+                await asyncio.wait_for(self._proc.wait(), grace)
             except asyncio.TimeoutError:
-                self._signaler(signal.SIGTERM)
+                self._signal(signal.SIGTERM)
                 try:
                     await asyncio.wait_for(self._proc.wait(), 3)
                 except asyncio.TimeoutError:
-                    self._signaler(signal.SIGKILL)
-        if self._lecteur is not None:
-            self._lecteur.cancel()
+                    self._signal(signal.SIGKILL)
+        if self._reader is not None:
+            self._reader.cancel()
         if self._stderr is not None:
             self._stderr.close()
 
-    def _signaler(self, sig: int) -> None:
-        """Vise le groupe du process, pas seulement le lanceur, pour ne laisser aucun enfant."""
+    def _signal(self, sig: int) -> None:
+        """Aims at the process group, not just the launcher, so no child is left behind."""
         assert self._proc is not None
         try:
             os.killpg(os.getpgid(self._proc.pid), sig)
@@ -112,165 +111,164 @@ class ClientAcp:
             self._proc.send_signal(sig)
 
     @property
-    def vivant(self) -> bool:
+    def alive(self) -> bool:
         return self._proc is not None and self._proc.returncode is None
 
-    # ── les quatre appels du protocole ──────────────────────────────────────────────
+    # ── the four protocol calls ─────────────────────────────────────────────────────
 
-    async def initialiser(self) -> dict:
-        """Annonce ce que le client sait faire ; la réponse donne les capacités de l'agent."""
-        self.capacites = await self.requete(
+    async def initialize(self) -> dict:
+        """Announces what the client can do; the answer gives the agent's capabilities."""
+        self.capabilities = await self.request(
             "initialize",
             {
                 "protocolVersion": 1,
                 "clientCapabilities": {"fs": {"readTextFile": True, "writeTextFile": True}},
             },
         )
-        return self.capacites
+        return self.capabilities
 
-    async def nouvelle_session(self, cwd: Path, serveurs_mcp: list[dict] | None = None) -> dict:
-        """Ouvre une session. La réponse porte sessionId, les modes et la liste des modèles."""
-        return await self.requete(
-            "session/new", {"cwd": str(cwd), "mcpServers": serveurs_mcp or []}
+    async def new_session(self, cwd: Path, mcp_servers: list[dict] | None = None) -> dict:
+        """Opens a session. The answer carries sessionId, the modes and the model list."""
+        return await self.request(
+            "session/new", {"cwd": str(cwd), "mcpServers": mcp_servers or []}
         )
 
-    async def charger_session(
-        self, session_id: str, cwd: Path, serveurs_mcp: list[dict] | None = None
+    async def load_session(
+        self, session_id: str, cwd: Path, mcp_servers: list[dict] | None = None
     ) -> dict:
-        """Reprend une session d'un process à l'autre : l'agent rejoue tout en notifications."""
-        return await self.requete(
+        """Resumes a session across processes: the agent replays everything as notifications."""
+        return await self.request(
             "session/load",
-            {"sessionId": session_id, "cwd": str(cwd), "mcpServers": serveurs_mcp or []},
+            {"sessionId": session_id, "cwd": str(cwd), "mcpServers": mcp_servers or []},
         )
 
-    async def prompt(self, session_id: str, texte: str) -> dict:
-        """Bloque jusqu'à la fin du tour et rend {stopReason, _meta.quota}."""
-        return await self.requete(
+    async def prompt(self, session_id: str, text: str) -> dict:
+        """Blocks until the end of the turn and returns {stopReason, _meta.quota}."""
+        return await self.request(
             "session/prompt",
-            {"sessionId": session_id, "prompt": [{"type": "text", "text": texte}]},
+            {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]},
         )
 
-    def annuler(self, session_id: str) -> None:
-        """Annule le tour, puis résout à la main les autorisations en vol.
+    def cancel(self, session_id: str) -> None:
+        """Cancels the turn, then resolves in-flight permission requests by hand.
 
-        L'agent ne les résout pas de lui-même : sans cette réponse `cancelled` le tour
-        reste ouvert indéfiniment. Les deux gestes ne se séparent jamais.
+        The agent does not resolve them on its own: without that `cancelled` answer the
+        turn stays open forever. The two gestures never come apart.
         """
-        self.notifier("session/cancel", {"sessionId": session_id})
-        for rid in list(self._autorisations):
-            self._autorisations.discard(rid)
-            tache = self._taches.get(rid)
-            if tache is not None:
-                tache.cancel()
-            self._envoyer({"jsonrpc": "2.0", "id": rid, "result": {"outcome": {"outcome": "cancelled"}}})
+        self.notify("session/cancel", {"sessionId": session_id})
+        for rid in list(self._permissions):
+            self._permissions.discard(rid)
+            task = self._tasks.get(rid)
+            if task is not None:
+                task.cancel()
+            self._send({"jsonrpc": "2.0", "id": rid, "result": {"outcome": {"outcome": "cancelled"}}})
 
     # ── transport ───────────────────────────────────────────────────────────────────
 
-    async def requete(self, methode: str, params: dict) -> Any:
-        """Envoie une requête et attend sa réponse."""
-        self._dernier_id += 1
-        rid = self._dernier_id
-        attente = asyncio.get_running_loop().create_future()
-        self._attentes[rid] = attente
-        self._envoyer({"jsonrpc": "2.0", "id": rid, "method": methode, "params": params})
-        return await attente
+    async def request(self, method: str, params: dict) -> Any:
+        """Sends a request and waits for its answer."""
+        self._last_id += 1
+        rid = self._last_id
+        pending = asyncio.get_running_loop().create_future()
+        self._pending[rid] = pending
+        self._send({"jsonrpc": "2.0", "id": rid, "method": method, "params": params})
+        return await pending
 
-    def notifier(self, methode: str, params: dict) -> None:
-        """Envoie une notification : aucun id, aucune réponse attendue."""
-        self._envoyer({"jsonrpc": "2.0", "method": methode, "params": params})
+    def notify(self, method: str, params: dict) -> None:
+        """Sends a notification: no id, no answer expected."""
+        self._send({"jsonrpc": "2.0", "method": method, "params": params})
 
-    def _envoyer(self, message: dict) -> None:
+    def _send(self, message: dict) -> None:
         if self._proc is None or self._proc.stdin is None:
-            raise AcpErreur("agent non démarré")
+            raise AcpError("agent not started")
         self._proc.stdin.write((json.dumps(message, ensure_ascii=False) + "\n").encode())
 
-    async def _boucle_lecture(self) -> None:
+    async def _read_loop(self) -> None:
         assert self._proc is not None and self._proc.stdout is not None
         while True:
-            ligne = await self._proc.stdout.readline()
-            if not ligne:
+            line = await self._proc.stdout.readline()
+            if not line:
                 break
-            ligne = ligne.strip()
-            if not ligne:
+            line = line.strip()
+            if not line:
                 continue
             try:
-                message = json.loads(ligne)
+                message = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            self._trier(message)
-        self._rompre_attentes(AcpErreur("le process agent s'est arrêté"))
+            self._dispatch(message)
+        self._fail_pending(AcpError("the agent process stopped"))
 
-    def _trier(self, message: dict) -> None:
+    def _dispatch(self, message: dict) -> None:
         rid = message.get("id")
         if rid is not None and "method" in message:
-            self._taches[rid] = asyncio.create_task(
-                self._servir(rid, message["method"], message.get("params") or {})
+            self._tasks[rid] = asyncio.create_task(
+                self._serve(rid, message["method"], message.get("params") or {})
             )
         elif rid is not None:
-            attente = self._attentes.pop(rid, None)
-            if attente is None or attente.done():
+            pending = self._pending.pop(rid, None)
+            if pending is None or pending.done():
                 return
             if "error" in message:
-                attente.set_exception(AcpErreur(json.dumps(message["error"], ensure_ascii=False)))
+                pending.set_exception(AcpError(json.dumps(message["error"], ensure_ascii=False)))
             else:
-                attente.set_result(message.get("result"))
+                pending.set_result(message.get("result"))
         else:
-            self.sur_notification(message)
+            self.on_notification(message)
 
-    async def _servir(self, rid: Any, methode: str, params: dict) -> None:
-        """Traite une requête de l'agent, dans sa propre tâche.
+    async def _serve(self, rid: Any, method: str, params: dict) -> None:
+        """Handles a request from the agent, in its own task.
 
-        La boucle de lecture ne doit jamais attendre ici : une autorisation peut rester
-        en suspens le temps qu'un humain se décide, et l'agent continue d'émettre pendant
-        ce temps.
+        The read loop must never wait here: a permission request may stay pending while a
+        human makes up their mind, and the agent keeps emitting during that time.
         """
         try:
-            if methode == "session/request_permission":
-                self._autorisations.add(rid)
-                resultat = {"outcome": await self.sur_autorisation(params)}
-            elif methode == "fs/read_text_file":
-                resultat = {"content": _lire_fichier(params)}
-            elif methode == "fs/write_text_file":
-                if self.sur_ecriture is not None:
-                    await self.sur_ecriture(params)
+            if method == "session/request_permission":
+                self._permissions.add(rid)
+                result = {"outcome": await self.on_permission(params)}
+            elif method == "fs/read_text_file":
+                result = {"content": _read_file(params)}
+            elif method == "fs/write_text_file":
+                if self.on_write is not None:
+                    await self.on_write(params)
                 else:
-                    ecrire_fichier(params)
-                resultat = None
+                    write_file(params)
+                result = None
             else:
-                raise AcpErreur(f"méthode inconnue : {methode}")
+                raise AcpError(f"unknown method: {method}")
         except asyncio.CancelledError:
-            return  # annuler() a déjà répondu « cancelled » à cette demande
-        except Exception as erreur:
-            self._envoyer(
-                {"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": str(erreur)}}
+            return  # cancel() already answered "cancelled" to this request
+        except Exception as error:
+            self._send(
+                {"jsonrpc": "2.0", "id": rid, "error": {"code": -32603, "message": str(error)}}
             )
         else:
-            self._envoyer({"jsonrpc": "2.0", "id": rid, "result": resultat})
+            self._send({"jsonrpc": "2.0", "id": rid, "result": result})
         finally:
-            self._autorisations.discard(rid)
-            self._taches.pop(rid, None)
+            self._permissions.discard(rid)
+            self._tasks.pop(rid, None)
 
-    def _rompre_attentes(self, erreur: Exception) -> None:
-        for attente in self._attentes.values():
-            if not attente.done():
-                attente.set_exception(erreur)
-        self._attentes.clear()
-
-
-def ecrire_fichier(params: dict) -> None:
-    """Écrit ce que l'agent demande. Les vérifications sont faites avant d'arriver ici."""
-    chemin = Path(params["path"])
-    chemin.parent.mkdir(parents=True, exist_ok=True)
-    chemin.write_text(params.get("content", ""), encoding="utf-8")
+    def _fail_pending(self, error: Exception) -> None:
+        for pending in self._pending.values():
+            if not pending.done():
+                pending.set_exception(error)
+        self._pending.clear()
 
 
-def _lire_fichier(params: dict) -> str:
-    """Lit un fichier pour l'agent, en respectant la fenêtre `line`/`limit` s'il en demande une."""
-    texte = Path(params["path"]).read_text(encoding="utf-8")
-    debut, limite = params.get("line"), params.get("limit")
-    if debut is None and limite is None:
-        return texte
-    lignes = texte.splitlines(keepends=True)[max((debut or 1) - 1, 0) :]
-    if limite is not None:
-        lignes = lignes[:limite]
-    return "".join(lignes)
+def write_file(params: dict) -> None:
+    """Writes what the agent asks for. The checks happen before we get here."""
+    path = Path(params["path"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(params.get("content", ""), encoding="utf-8")
+
+
+def _read_file(params: dict) -> str:
+    """Reads a file for the agent, honouring the `line`/`limit` window if it asks for one."""
+    text = Path(params["path"]).read_text(encoding="utf-8")
+    start, limit = params.get("line"), params.get("limit")
+    if start is None and limit is None:
+        return text
+    lines = text.splitlines(keepends=True)[max((start or 1) - 1, 0) :]
+    if limit is not None:
+        lines = lines[:limit]
+    return "".join(lines)

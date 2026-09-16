@@ -1,11 +1,11 @@
-"""Adaptateur Gemini : récupérer la sortie des commandes, que le flux ACP n'envoie pas.
+"""Gemini adapter: recovering command output, which the ACP stream does not send.
 
-Ni la sortie des commandes ni le contenu des fichiers lus ne remontent avec la fin de
-l'outil. Le seul endroit où ils existent est le journal de télémétrie local, et ils y
-arrivent **avec la requête modèle suivante** — une à deux secondes après, d'un bloc.
+Neither command output nor the content of files read comes back with the end of the tool.
+The only place they exist is the local telemetry log, and they land there **with the next
+model request** — one or two seconds later, in one block.
 
-Le journal n'est pas du JSONL malgré son extension : c'est une suite d'objets JSON indentés
-collés les uns aux autres. On le décode donc en flux, objet par objet.
+The log is not JSONL despite its extension: it is a run of indented JSON objects glued
+together. So we decode it as a stream, object by object.
 """
 
 from __future__ import annotations
@@ -16,116 +16,116 @@ import re
 from pathlib import Path
 from typing import Callable, Iterator
 
-EVENEMENT = "gemini_cli.api_request"
-MOTIF_PGID = re.compile(r"(?m)^Process Group PGID: \d+$\n?")
-DECODEUR = json.JSONDecoder()
+EVENT = "gemini_cli.api_request"
+PGID_PATTERN = re.compile(r"(?m)^Process Group PGID: \d+$\n?")
+DECODER = json.JSONDecoder()
 
-# La sortie arrive avec la requête modèle suivante ; s'il n'y en a pas, elle ne viendra
-# jamais. Mesuré à +5,5 s sur un `wc -l` — le « 1 à 2 s » annoncé est optimiste, d'où la marge.
+# Output arrives with the next model request; if there is none, it will never come.
+# Measured at +5.5 s on a `wc -l` — the announced "1 to 2 s" is optimistic, hence the margin.
 GRACE = 8.0
 
 
-def objets(texte: str) -> tuple[list[dict], int]:
-    """Décode tous les objets JSON complets d'un texte, et rend où l'on s'est arrêté."""
-    trouves: list[dict] = []
+def objects(text: str) -> tuple[list[dict], int]:
+    """Decodes every complete JSON object in a text, and returns where we stopped."""
+    found: list[dict] = []
     i = 0
-    while i < len(texte):
-        while i < len(texte) and texte[i] in " \r\n\t":
+    while i < len(text):
+        while i < len(text) and text[i] in " \r\n\t":
             i += 1
-        if i >= len(texte):
+        if i >= len(text):
             break
         try:
-            objet, j = DECODEUR.raw_decode(texte, i)
+            obj, j = DECODER.raw_decode(text, i)
         except ValueError:
-            break  # objet encore incomplet : on le reprendra au prochain passage
-        trouves.append(objet)
+            break  # object still incomplete: we will pick it up on the next pass
+        found.append(obj)
         i = j
-    return trouves, i
+    return found, i
 
 
-def sorties_de(objet: dict) -> Iterator[tuple[str, str, str]]:
-    """Rend les (nom d'outil, identifiant d'appel, sortie) portés par un enregistrement."""
-    attributs = objet.get("attributes") or {}
-    if attributs.get("event.name") != EVENEMENT:
+def outputs_of(obj: dict) -> Iterator[tuple[str, str, str]]:
+    """Yields the (tool name, call id, output) carried by one record."""
+    attributes = obj.get("attributes") or {}
+    if attributes.get("event.name") != EVENT:
         return
     try:
-        contenu = json.loads(attributs.get("request_text") or "")
+        content = json.loads(attributes.get("request_text") or "")
     except ValueError:
         return
-    for reponse in _reponses(contenu):
-        sortie = (reponse.get("response") or {}).get("output")
-        if reponse.get("id") and sortie is not None:
-            yield reponse.get("name", ""), reponse["id"], nettoyer(str(sortie))
+    for response in _responses(content):
+        output = (response.get("response") or {}).get("output")
+        if response.get("id") and output is not None:
+            yield response.get("name", ""), response["id"], clean(str(output))
 
 
-def _reponses(noeud) -> Iterator[dict]:
-    if isinstance(noeud, dict):
-        if isinstance(noeud.get("functionResponse"), dict):
-            yield noeud["functionResponse"]
-        for valeur in noeud.values():
-            yield from _reponses(valeur)
-    elif isinstance(noeud, list):
-        for valeur in noeud:
-            yield from _reponses(valeur)
+def _responses(node) -> Iterator[dict]:
+    if isinstance(node, dict):
+        if isinstance(node.get("functionResponse"), dict):
+            yield node["functionResponse"]
+        for value in node.values():
+            yield from _responses(value)
+    elif isinstance(node, list):
+        for value in node:
+            yield from _responses(value)
 
 
-def nettoyer(sortie: str) -> str:
-    """Retire l'emballage que l'agent ajoute autour d'une sortie de commande.
+def clean(output: str) -> str:
+    """Strips the wrapping the agent adds around a command output.
 
-    Les espaces qui suivent `Output:` appartiennent à la sortie (`wc -l` s'aligne) : on
-    n'enlève que l'étiquette elle-même.
+    The spaces after `Output:` belong to the output (`wc -l` aligns on them): we only
+    remove the label itself.
     """
-    texte = sortie
-    debut = texte.find("<untrusted_context>")
-    if debut != -1:
-        fin = texte.find("</untrusted_context>", debut)
-        texte = texte[debut + len("<untrusted_context>") : fin if fin != -1 else None]
-    texte = MOTIF_PGID.sub("", texte).strip("\n")
-    if texte.startswith("Output:"):
-        texte = texte[len("Output:") :]
-    return texte.strip("\n")
+    text = output
+    start = text.find("<untrusted_context>")
+    if start != -1:
+        end = text.find("</untrusted_context>", start)
+        text = text[start + len("<untrusted_context>") : end if end != -1 else None]
+    text = PGID_PATTERN.sub("", text).strip("\n")
+    if text.startswith("Output:"):
+        text = text[len("Output:") :]
+    return text.strip("\n")
 
 
-class SortiesGemini:
-    """Suit le journal d'un bot et signale chaque sortie dès qu'elle y apparaît."""
+class GeminiOutputs:
+    """Follows a bot's log and reports each output as soon as it shows up."""
 
-    def __init__(self, chemin: Path, sur_sortie: Callable[[str, str], None]) -> None:
-        self.chemin = chemin
-        self.sur_sortie = sur_sortie
+    def __init__(self, path: Path, on_output: Callable[[str, str], None]) -> None:
+        self.path = path
+        self.on_output = on_output
         self._position = 0
-        self._reste = ""
-        self._tache: asyncio.Task | None = None
-        self._vues: set[str] = set()
+        self._rest = ""
+        self._task: asyncio.Task | None = None
+        self._seen: set[str] = set()
 
-    def demarrer(self) -> None:
-        self._tache = asyncio.create_task(self._suivre())
+    def start(self) -> None:
+        self._task = asyncio.create_task(self._follow())
 
-    def arreter(self) -> None:
-        if self._tache is not None:
-            self._tache.cancel()
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
 
-    async def _suivre(self, intervalle: float = 0.5) -> None:
+    async def _follow(self, interval: float = 0.5) -> None:
         while True:
-            self.moissonner()
-            await asyncio.sleep(intervalle)
+            self.harvest()
+            await asyncio.sleep(interval)
 
-    def moissonner(self) -> None:
-        """Lit ce qui s'est ajouté au journal et remonte les sorties encore inconnues."""
-        if not self.chemin.exists():
+    def harvest(self) -> None:
+        """Reads what was appended to the log and reports the outputs not yet known."""
+        if not self.path.exists():
             return
-        with self.chemin.open("r", encoding="utf-8", errors="replace") as fichier:
-            fichier.seek(self._position)
-            self._reste += fichier.read()
-            self._position = fichier.tell()
-        trouves, consomme = objets(self._reste)
-        self._reste = self._reste[consomme:]
-        for objet in trouves:
-            for _, identifiant, sortie in sorties_de(objet):
-                if identifiant not in self._vues:
-                    self._vues.add(identifiant)
-                    self.sur_sortie(identifiant, sortie)
+        with self.path.open("r", encoding="utf-8", errors="replace") as file:
+            file.seek(self._position)
+            self._rest += file.read()
+            self._position = file.tell()
+        found, consumed = objects(self._rest)
+        self._rest = self._rest[consumed:]
+        for obj in found:
+            for _, call_id, output in outputs_of(obj):
+                if call_id not in self._seen:
+                    self._seen.add(call_id)
+                    self.on_output(call_id, output)
 
 
-def identifiant_court(tool_call_id: str) -> str:
-    """Le `toolCallId` d'ACP vaut `<nom>__<id>` : c'est le `<id>` qui raccorde au journal."""
+def short_id(tool_call_id: str) -> str:
+    """The ACP `toolCallId` is `<name>__<id>`: the `<id>` is what links to the log."""
     return tool_call_id.rsplit("__", 1)[-1]

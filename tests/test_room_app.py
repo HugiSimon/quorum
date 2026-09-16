@@ -1,4 +1,4 @@
-"""La salle de bout en bout : deux bots en parallèle, deux autorisations, un fil qui survit."""
+"""The room end to end: two bots in parallel, two permissions, a thread that survives."""
 
 import asyncio
 import sys
@@ -10,84 +10,84 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from textual.widgets import Input  # noqa: E402
 
 from quorum import bot as bots  # noqa: E402
-from quorum.app import Bulle, Quorum  # noqa: E402
-from quorum.room import Transcript, charger_salle  # noqa: E402
+from quorum.app import Bubble, Quorum  # noqa: E402
+from quorum.room import Transcript, load_room  # noqa: E402
 
-from atelier import attendre, monter_projet, saisie_prete  # noqa: E402
+from workshop import wait_for, build_project, input_ready  # noqa: E402
 
 async def main() -> None:
     with tempfile.TemporaryDirectory() as tmp:
-        racine = Path(tmp)
-        monter_projet(racine)
-        salle = charger_salle(racine, "essai")
-        connus = bots.charger_tous(racine / "bots")
+        root = Path(tmp)
+        build_project(root)
+        room = load_room(root, "trial")
+        known = bots.load_all(root / "bots")
 
-        app = Quorum(salle, connus)
-        app.transcript = Transcript(salle.racine / "transcript.jsonl")
+        app = Quorum(room, known)
+        app.transcript = Transcript(room.root / "transcript.jsonl")
         async with app.run_test() as pilot:
-            un, deux = app.participants["faux1"], app.participants["faux2"]
-            await attendre(pilot, lambda: un.pret and deux.pret, "les deux sessions s'ouvrent")
-            await saisie_prete(pilot, app)
+            one, two = app.participants["fake1"], app.participants["fake2"]
+            await wait_for(pilot, lambda: one.ready and two.ready, "both sessions open")
+            await input_ready(pilot, app)
 
-            # Une mention explicite ne réveille qu'un bot.
-            app.query_one(Input).value = "@faux1 PERM supprime .venv"
+            # An explicit mention only wakes one bot.
+            app.query_one(Input).value = "@fake1 PERM delete .venv"
             await pilot.press("enter")
-            await attendre(pilot, lambda: un.panneau is not None, "l'autorisation de faux1")
-            assert deux.tour is None, "une mention explicite ne doit réveiller personne d'autre"
-            assert [o["kind"] for o in un.panneau.options] == \
+            await wait_for(pilot, lambda: one.panel is not None, "fake1's permission")
+            assert two.turn is None, "an explicit mention must wake nobody else"
+            assert [o["kind"] for o in one.panel.options] == \
                 ["allow_once", "allow_always", "reject_once"], \
-                "la touche 1 ne doit jamais tomber sur la permission la plus large"
-            assert un.panneau.options[0]["name"] == "Allow", "le libellé de l'agent, tel quel"
-            assert un.bulle.outils and un.bulle.outils[0]["titre"].startswith("rm -rf")
-            assert un.bulle.outils[0]["famille"] == "shell", un.bulle.outils[0]
-            un.panneau.choisir(un.panneau.options[0])
-            await attendre(pilot, lambda: un.tour.done(), "le tour de faux1 se termine")
+                "key 1 must never land on the widest permission"
+            assert one.panel.options[0]["name"] == "Allow", "the agent's label, as it is"
+            assert one.bubble.tools and one.bubble.tools[0]["title"].startswith("rm -rf")
+            assert one.bubble.tools[0]["family"] == "shell", one.bubble.tools[0]
+            one.panel.choose(one.panel.options[0])
+            await wait_for(pilot, lambda: one.turn.done(), "fake1's turn ends")
 
-            # Sans mention, tout le monde répond — et en parallèle.
-            app.query_one(Input).value = "PERM et vous en pensez quoi ?"
+            # Without a mention, everyone answers — and in parallel.
+            app.query_one(Input).value = "PERM and what do you think?"
             await pilot.press("enter")
-            await attendre(
+            await wait_for(
                 pilot,
-                lambda: un.panneau is not None and deux.panneau is not None,
-                "deux autorisations en attente en même temps",
+                lambda: one.panel is not None and two.panel is not None,
+                "two permissions pending at the same time",
             )
-            assert un.bulle is not deux.bulle, "deux flux, deux blocs"
-            focus = [p.nom for p in app.participants.values() if p.panneau.has_focus]
-            assert len(focus) == 1, f"un seul panneau décide à la fois, pas {focus}"
+            assert one.bubble is not two.bubble, "two streams, two blocks"
+            focus = [p.name for p in app.participants.values() if p.panel.has_focus]
+            assert len(focus) == 1, f"one panel decides at a time, not {focus}"
 
-            for participant in (un, deux):
-                participant.panneau.choisir(participant.panneau.options[0])
-            await attendre(pilot, lambda: un.tour.done() and deux.tour.done(), "les deux tours")
+            for participant in (one, two):
+                participant.panel.choose(participant.panel.options[0])
+            await wait_for(pilot, lambda: one.turn.done() and two.turn.done(), "both turns")
 
-            assert "faux1" in un.bulle.corps and "faux2" not in un.bulle.corps, un.bulle.corps
-            assert "faux2" in deux.bulle.corps and "faux1" not in deux.bulle.corps, deux.bulle.corps
+            assert "fake1" in one.bubble.body and "fake2" not in one.bubble.body, one.bubble.body
+            assert "fake2" in two.bubble.body and "fake1" not in two.bubble.body, two.bubble.body
 
-        # Le fil a survécu à la fermeture, et se relit sans aucun agent.
-        relu = Transcript(salle.racine / "transcript.jsonl")
-        genres = [(e.genre, e.auteur) for e in relu.entrees]
-        assert genres == [
-            ("utilisateur", "toi"), ("bot", "faux1"),
-            ("utilisateur", "toi"), ("bot", "faux1"), ("bot", "faux2"),
-        ], genres
+        # The thread survived the shutdown, and reads back without any agent.
+        back = Transcript(room.root / "transcript.jsonl")
+        kinds = [(e.kind, e.author) for e in back.entries]
+        assert kinds == [
+            ("user", "you"), ("bot", "fake1"),
+            ("user", "you"), ("bot", "fake1"), ("bot", "fake2"),
+        ], kinds
 
-        froid = Quorum(charger_salle(racine, "essai"), connus)
-        async with froid.run_test() as pilot:
-            await attendre(pilot, lambda: all(p.pret for p in froid.participants.values()),
-                           "les sessions reprises")
-            await saisie_prete(pilot, froid)
-            bulles = froid.query_one("#fil").query(Bulle)
-            assert len(bulles) >= 5, f"{len(bulles)} bulles restaurées"
-            # L'index vu survit au redémarrage : un bot ne se fait pas relire ce qu'il sait.
-            # Il diffère d'un bot à l'autre, et c'est juste — faux1 a fini son tour avant
-            # que faux2 n'écrive, donc il n'a pas encore vu son message.
-            for participant in froid.participants.values():
-                assert participant.demarrage == "repris", participant.demarrage
-                assert participant.vu == froid.etat_salle["vu"][participant.nom] > 0, (
-                    participant.nom, participant.vu, froid.etat_salle["vu"]
+        cold = Quorum(load_room(root, "trial"), known)
+        async with cold.run_test() as pilot:
+            await wait_for(pilot, lambda: all(p.ready for p in cold.participants.values()),
+                           "the resumed sessions")
+            await input_ready(pilot, cold)
+            bubbles = cold.query_one("#thread").query(Bubble)
+            assert len(bubbles) >= 5, f"{len(bubbles)} bubbles restored"
+            # The seen index survives the restart: a bot is not made to re-read what it knows.
+            # It differs from one bot to the other, and rightly so — fake1 finished its turn
+            # before fake2 wrote, so it has not seen its message yet.
+            for participant in cold.participants.values():
+                assert participant.startup == "resumed", participant.startup
+                assert participant.seen == cold.room_state["seen"][participant.name] > 0, (
+                    participant.name, participant.seen, cold.room_state["seen"]
                 )
-                assert not participant.memoire_expiree
-            assert not froid.query(".expiration"), "rien n'a expiré : pas de panneau S10"
-    print("test_room_app : mention ok · parallèle ok · 2 autorisations ok · fil persistant ok")
+                assert not participant.memory_lost
+            assert not cold.query(".expiry"), "nothing expired: no S10 panel"
+    print("test_room_app: mention ok · parallel ok · 2 permissions ok · persistent thread ok")
 
 
 if __name__ == "__main__":
