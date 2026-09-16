@@ -39,9 +39,10 @@ async def main() -> None:
             # `locations` alimente le panneau des fichiers touchés.
             assert un.fichiers == {"/tmp/notes.md": "lu"}, un.fichiers
 
-            # La bulle propose d'ouvrir le raisonnement, et l'écran S7 s'ouvre.
-            assert un.bulle.ouvrable and un.bulle.proprietaire == "faux1"
-            app.ouvrir_raisonnement("faux1")
+            # ^R ouvre le raisonnement du dernier bot actif — au clavier, sans souris.
+            assert un.bulle.proprietaire == "faux1"
+            assert app.dernier_actif() == "faux1", app.dernier_actif()
+            app.action_raisonnement()
             await pilot.pause(0.25)
             ecran = app.screen
             assert isinstance(ecran, EcranRaisonnement), ecran
@@ -88,6 +89,13 @@ async def main() -> None:
             app.sur_sortie(un, "call_7", "contenu tardif")
             assert not lecture["sortie_perdue"] and lecture["sortie"] == "contenu tardif", lecture
             assert "sortie non parvenue" not in un.bulle.rendu().plain
+
+            # Une fois le tour fini, le fil ne garde que le message et un compte discret.
+            un.bulle.etat = "fini"
+            fini = un.bulle.rendu().plain
+            assert "Reading The Sources" not in fini, fini
+            assert "ouvrir le raisonnement" not in fini, fini
+            assert "2 outils" in fini, fini
     print("test_raisonnement : jalons ok · fichiers ok · écran S7 ok · sortie décalée et perdue ok")
 
 

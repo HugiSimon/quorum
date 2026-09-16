@@ -50,6 +50,8 @@ async def scenario_expiration() -> None:
                 assert participant.memoire_expiree, participant.nom
                 assert participant.demarrage == "neuf", participant.demarrage
                 assert participant.vu == 0, "mémoire perdue : le bot repart du fil entier"
+            await attendre(pilot, lambda: app.query_one(PanneauExpiration).texte_brut,
+                           "le panneau peint")
             assert app.query_one(PanneauExpiration).texte_brut.count("\n") >= 4
 
             # Issue 3 : archiver. Le fil part de côté, rien n'est supprimé.

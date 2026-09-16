@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from atelier import attendre, monter_projet  # noqa: E402
-from quorum.ecrans import Accueil, EcranFicheBot  # noqa: E402
+from quorum.ecrans import Accueil, EcranAccueil, EcranFicheBot  # noqa: E402
 from quorum.room import Transcript  # noqa: E402
 
 
@@ -21,9 +21,11 @@ async def scenario_vide() -> None:
         os.environ["QUORUM_CONFIG"] = str(racine / "config")
         app = Accueil(racine)
         async with app.run_test(size=(100, 24)) as pilot:
-            await pilot.pause(0.1)
-            assert app.salles == [] and app.bots == {}
-            texte = app.query_one("#corps").render().plain
+            await pilot.pause(0.2)
+            accueil = app.screen
+            assert isinstance(accueil, EcranAccueil), accueil
+            assert accueil.salles == [] and accueil.bots == {}
+            texte = accueil.query_one("#corps").render().plain
             assert "créer mon premier bot" in texte, texte
             assert "Une salle réunit tes bots" in texte
 
@@ -51,18 +53,32 @@ async def scenario_liste() -> None:
 
         app = Accueil(racine)
         async with app.run_test(size=(120, 30)) as pilot:
-            await pilot.pause(0.1)
-            noms = [s["nom"] for s in app.salles]
+            await pilot.pause(0.2)
+            accueil = app.screen
+            noms = [s["nom"] for s in accueil.salles]
             assert noms == ["essai", "ancienne"], noms  # la plus récemment écrite en tête
-            assert app.salles[0]["messages"] == 2, app.salles[0]
-            assert app.salles[1]["quand"] == "jamais ouverte", app.salles[1]
+            assert accueil.salles[0]["messages"] == 2, accueil.salles[0]
+            assert accueil.salles[1]["quand"] == "jamais ouverte", accueil.salles[1]
 
-            texte = app.query_one("#corps").render().plain
+            texte = accueil.query_one("#corps").render().plain
             assert "@faux1" in texte and "@faux2" in texte, texte
             assert "SALLES" in texte and "BOTS" in texte
 
             await pilot.press("down")
-            assert app.curseur == 1
+            assert accueil.curseur["salles"] == 1
+
+            # ⇥ passe aux bots, et ⏎ y ouvre la fiche — plus l'ouverture d'une salle.
+            await pilot.press("tab")
+            assert accueil.section == "bots"
+            await pilot.press("enter")
+            await pilot.pause(0.2)
+            assert isinstance(app.screen, EcranFicheBot), app.screen
+            assert app.screen.bot.nom == "faux1", app.screen.bot.nom
+            await pilot.press("escape")
+            await pilot.pause(0.2)
+
+            await pilot.press("tab")
+            assert accueil.section == "salles"
             await pilot.press("enter")
             await pilot.pause(0.1)
         assert app.return_value == "ancienne", app.return_value

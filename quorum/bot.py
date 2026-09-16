@@ -199,7 +199,9 @@ def pouvoir(regles: list[Regle]) -> tuple[int, str]:
     phrases.append("lance des commandes" if lance else "ne lance aucune commande")
     phrases.append("sort sur le réseau" if sort else "ne sort pas sur le réseau")
     return niveau, (
-        " ; ".join(phrases) + f". {garde_fous} garde-fous, {interdits} interdits."
+        " ; ".join(phrases)
+        + f". {garde_fous} garde-fou{'s' if garde_fous > 1 else ''}, "
+        + f"{interdits} interdit{'s' if interdits > 1 else ''}."
     )
 
 

@@ -145,14 +145,21 @@ def regle(titre: str, largeur: int, note: str = ""):
     """Le seul marqueur de libellé du design : ─┤ TITRE ├── suivi d'un filet.
 
     La grille n'a pas d'interlettrage : un libellé espacé doublerait sa largeur en vraies
-    espaces. Tous les titres passent par ici.
+    espaces. Tous les titres passent par ici. Le filet est discret, le **titre** ne l'est
+    pas : c'est un repère de lecture, pas de la décoration.
     """
     from rich.text import Text
 
-    entete = f"─┤ {titre} ├──"
+    texte = Text()
+    texte.append("─┤ ", style=N["cadre"])
+    texte.append(titre, style=f"bold {N['encre']}")
+    texte.append(" ├─", style=N["cadre"])
+    reste = largeur - len(titre) - 6
     if note:
-        entete += f"  {note} "
-    return Text(entete + "─" * max(0, largeur - len(entete)) + "\n", style=N["cadre"])
+        texte.append(f"  {note} ", style=N["dim"])
+        reste -= len(note) + 3
+    texte.append("─" * max(2, reste) + "\n", style=N["cadre"])
+    return texte
 
 
 appliquer_theme(True)

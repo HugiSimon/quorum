@@ -115,8 +115,6 @@ class Participant:
 class Bulle(Static):
     """Un bloc d'un auteur : en-tête, outils, corps. Le même gabarit pour tout le monde."""
 
-    can_focus = True
-
     def __init__(
         self,
         auteur: str,
@@ -162,12 +160,13 @@ class Bulle(Static):
             texte.append_text(self.ligne_outil(outil))
 
         for ligne in self.corps.rstrip().splitlines():
-            texte.append(f"  {ligne}\n", style=N["encre"])
+            texte.append(f"    {ligne}\n", style=N["encre"])
 
-        if self.etat is not None and self.raisonnement_visible and self.jalons:
+        # Pendant le travail on montre les jalons ; une fois le message écrit, il se suffit.
+        fini = self.etat in ("fini", "horsjeu", "echec")
+        if self.raisonnement_visible and self.jalons and not fini and not self.compacte:
             montres = (
-                [] if self.compacte
-                else self.jalons if self.raisonnement == "déplié"
+                self.jalons if self.raisonnement == "déplié"
                 else self.jalons[-1:] if self.raisonnement == "dernière ligne"
                 else []
             )
@@ -175,12 +174,11 @@ class Bulle(Static):
                 texte.append("  ┊ ", style=self.couleur)
                 texte.append(f"{jalon['titre']}\n", style=N["dim"])
 
-        if self.etat is not None and self.raisonnement_visible and (self.jalons or self.outils):
-            texte.append("  ┊ ouvrir le raisonnement ⏎", style=CLIQUABLE)
-            details = f" · {len(self.jalons)} jalons · {len(self.outils)} outils"
-            if self.debut is not None:
-                details += f" · {_duree(time.monotonic() - self.debut)}"
-            texte.append(f"{details}\n", style=N["faible"])
+        if fini and self.raisonnement_visible and (self.jalons or self.outils):
+            compte = f"{len(self.outils)} outils"
+            if self.jalons:
+                compte += f" · {len(self.jalons)} jalons"
+            texte.append(f"    ┊ {compte}\n", style=N["faible"])
         return texte
 
     def ligne_outil(self, outil: dict) -> Text:
@@ -215,18 +213,6 @@ class Bulle(Static):
 
     def rafraichir(self) -> None:
         self.update(self.rendu())
-
-    def on_click(self) -> None:
-        self.focus()
-
-    def on_key(self, evenement) -> None:
-        if evenement.key == "enter" and self.ouvrable:
-            evenement.stop()
-            self.app.ouvrir_raisonnement(self.proprietaire)
-
-    @property
-    def ouvrable(self) -> bool:
-        return self.proprietaire is not None and bool(self.jalons or self.outils)
 
     @property
     def heure_relative(self) -> str:
@@ -274,7 +260,7 @@ class PanneauAutorisation(Static):
         texte.append(f"  {clignote} ", style=ATTENTION)
         texte.append(f"@{self.participant.nom}", style=f"bold {self.participant.couleur}")
         texte.append(" demande une autorisation", style=ATTENTION)
-        texte.append("  ⇥ suivante\n" if not self.has_focus else "\n", style=N["faible"])
+        texte.append("\n", style=N["faible"])
 
         titre = self.appel.get("title") or self.appel.get("toolCallId", "")
         if titre:
@@ -301,11 +287,14 @@ class PanneauAutorisation(Static):
                 texte.append(f"    {i} ", style=CLIQUABLE)
                 texte.append(f"{marque} ", style=ROUGE if refus else VERT)
                 texte.append(f"{option.get('name', option.get('optionId'))}\n", style=N["encre"])
-            if self.has_focus:
-                texte.append(
-                    "    1-9 décider · r refuser en expliquant · esc revenir à la saisie\n",
-                    style=N["faible"],
-                )
+            texte.append("    1-9 ", style=CLIQUABLE)
+            texte.append("décider   ", style=N["dim"])
+            texte.append("r ", style=CLIQUABLE)
+            texte.append("refuser en expliquant   ", style=N["dim"])
+            texte.append("⇥ ", style=CLIQUABLE)
+            texte.append("demande suivante   ", style=N["dim"])
+            texte.append("esc ", style=CLIQUABLE)
+            texte.append("revenir à la saisie\n", style=N["dim"])
         self.update(texte)
 
     def rendre_la_saisie(self) -> None:
@@ -451,6 +440,7 @@ class PanneauExpiration(Static):
     def __init__(self, noms: list[str], messages: int) -> None:
         super().__init__()
         self.noms, self.messages = noms, messages
+        self.texte_brut = ""
 
     def on_mount(self) -> None:
         texte = Text()
@@ -466,7 +456,7 @@ class PanneauExpiration(Static):
         texte.append("    esc revenir à la saisie — le fil reste lisible\n", style=N["faible"])
         self.update(texte)
         self.texte_brut = texte.plain
-        self.focus()
+        self.call_after_refresh(self.focus)
 
     def on_key(self, evenement) -> None:
         if evenement.key == "escape":
@@ -621,11 +611,17 @@ class Quorum(App):
     #fil { width: 1fr; padding: 1 2; }
     #cote { width: 46; padding: 1 2; background: $panneau; }
     #fil > Static { margin-bottom: 1; }
+    #fil > Static:focus { background: $panneau; }
     #fil.compacte > Static { margin-bottom: 0; }
     #bandeau { height: 1; padding: 0 2; color: $dim; background: $panneau; }
-    #saisie { height: 1; }
-    #chevron { width: 2; padding: 0 0 0 2; color: $cliquable; }
-    Input { border: none; background: $fond; padding: 0; height: 1; }
+    #saisie { height: 1; background: $cadre; }
+    #chevron { width: 4; padding: 0 0 0 2; color: $cliquable; text-style: bold;
+               background: $cadre; }
+    Input { border: none; background: $cadre; padding: 0; height: 1; color: $encre; }
+    Input > .input--placeholder { color: $dim; }
+    #fil { scrollbar-size-vertical: 1; scrollbar-color: $cadre; scrollbar-color-hover: $dim;
+           scrollbar-color-active: $cliquable; scrollbar-background: $fond;
+           scrollbar-background-hover: $fond; scrollbar-background-active: $fond; }
     """
 
     BINDINGS = [
@@ -677,8 +673,8 @@ class Quorum(App):
             yield Static(id="cote")
         yield Static(id="bandeau")
         with Horizontal(id="saisie"):
-            yield Static("◇", id="chevron")
-            yield Input(placeholder="écris pendant qu'ils travaillent…", id="message")
+            yield Static("◇ ", id="chevron")
+            yield Input(placeholder="écris ici — ⏎ envoyer · @nom pour viser un bot", id="message")
 
     async def on_mount(self) -> None:
         self.query_one("#relecture", Static).display = False
@@ -689,7 +685,12 @@ class Quorum(App):
             await self.ajouter(self.bulle_passee(entree))
         if self.transcript.entrees:
             await self.ajouter(
-                self.ligne(f"{len(self.transcript.entrees)} messages restaurés", N["faible"])
+                self.ligne(
+                    f"{len(self.transcript.entrees)} message"
+                    f"{'s' if len(self.transcript.entrees) > 1 else ''} restauré"
+                    f"{'s' if len(self.transcript.entrees) > 1 else ''}",
+                    N["faible"],
+                )
             )
         for nom in self.manquants:
             await self.ajouter(self.ligne(f"✕ aucun bot nommé « {nom} » dans bots/", ROUGE))
@@ -750,6 +751,9 @@ class Quorum(App):
         if self.demarrage is not None:
             self.demarrage.rafraichir()
             if all(p.demarrage in ("repris", "neuf", "échec") for p in self.participants.values()):
+                # Le démarrage est un état, pas une trace : il s'efface une fois passé.
+                if not any(p.demarrage == "échec" for p in self.participants.values()):
+                    self.demarrage.remove()
                 self.demarrage = None
         for participant in self.participants.values():
             if participant.bulle is not None and participant.bulle.etat in VIVANTS:
@@ -1389,10 +1393,8 @@ class Quorum(App):
         return []
 
     def action_fiche(self) -> None:
-        """La fiche du bot dont la bulle a le focus, sinon un bot neuf."""
-        vise = next(
-            (b.proprietaire for b in self.query(Bulle) if b.has_focus and b.proprietaire), None
-        )
+        """La fiche du dernier bot qui a parlé, sinon un bot neuf."""
+        vise = self.dernier_actif()
         prises = {p.bot.teinte for p in self.participants.values() if p.nom != vise}
         self.push_screen(
             EcranFicheBot(self.salle.racine.parents[1], vise, self.modeles_connus(), prises),
@@ -1451,11 +1453,13 @@ class Quorum(App):
                 participant.bulle.rafraichir()
         self.peindre_bandeau()
 
-    def action_raisonnement(self) -> None:
-        """Le raisonnement du dernier bot qui a parlé — sans aller chercher sa bulle."""
+    def dernier_actif(self) -> str | None:
         vivants = [p for p in self.participants.values() if p.bulle is not None]
-        if vivants:
-            self.ouvrir_raisonnement(max(vivants, key=lambda p: p.debut_tour).nom)
+        return max(vivants, key=lambda p: p.debut_tour).nom if vivants else None
+
+    def action_raisonnement(self) -> None:
+        """Le raisonnement du dernier bot qui a parlé."""
+        self.ouvrir_raisonnement(self.dernier_actif())
 
     def action_suivre(self) -> None:
         self.query_one("#fil", VerticalScroll).scroll_end(animate=False)
@@ -1466,8 +1470,12 @@ class Quorum(App):
         for participant in self.participants.values():
             if participant.journal is not None:
                 participant.journal.arreter()
-            if participant.client is not None:
-                await participant.client.fermer()
+        # En parallèle et court : séquentiel à 4 s par bot, on rendait la main au terminal
+        # plusieurs secondes avant de revenir à l'accueil.
+        await asyncio.gather(*(
+            p.client.fermer(delai_propre=1.0)
+            for p in self.participants.values() if p.client is not None
+        ), return_exceptions=True)
 
 
 def main() -> None:

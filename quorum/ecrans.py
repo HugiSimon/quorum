@@ -11,7 +11,7 @@ from pathlib import Path
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.binding import Binding
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, VerticalScroll
 from textual.screen import Screen
 from textual.widgets import Input, Static, TextArea
 
@@ -32,6 +32,55 @@ from .theme import (
 )
 
 DECISIONS = ("allow", "ask_user", "deny")
+
+
+class ChampTexte(Horizontal):
+    """Un champ de saisie avec son libellé. Sans libellé, on ne sait pas ce qu'on édite.
+
+    Les tailles vivent ici : une règle d'écran ne l'emporte pas sur la hauteur par défaut
+    d'un conteneur, et la rangée s'étirait sur tout l'espace libre.
+    """
+
+    DEFAULT_CSS = """
+    ChampTexte { height: 1; margin-bottom: 1; }
+    ChampTexte > .etiquette { width: 18; height: 1; }
+    ChampTexte > Input { width: 1fr; height: 1; }
+    """
+
+    def __init__(self, etiquette: str, valeur: str, identifiant: str, note: str = "") -> None:
+        super().__init__()
+        self.etiquette, self.valeur, self.identifiant, self.note = (
+            etiquette, valeur, identifiant, note
+        )
+
+    def compose(self) -> ComposeResult:
+        libelle = Static(classes="etiquette")
+        libelle.update(Text(f"  {self.etiquette:<14}", style=N["dim"]))
+        yield libelle
+        yield Input(value=self.valeur, placeholder=self.note or self.etiquette,
+                    id=self.identifiant)
+
+
+class Navigable(Screen):
+    def pied_standard(self) -> "Text":
+        pied = Text()
+        for touche, quoi in (("↑↓ ⇥", "champ suivant"), ("← →", "changer la valeur"),
+                             ("^S", "enregistrer"), ("esc", "abandonner")):
+            pied.append(f"{touche} ", style=CLIQUABLE)
+            pied.append(f"{quoi}   ", style=N["dim"])
+        return pied
+
+    """Un écran de réglages : ⇥ et les flèches haut/bas mènent au champ suivant.
+
+    Les flèches ne sont pas prioritaires : une zone de texte les consomme d'abord pour
+    déplacer son curseur, et seul un champ qui n'en a pas l'usage laisse passer.
+    """
+
+    def action_champ_suivant(self) -> None:
+        self.focus_next()
+
+    def action_champ_precedent(self) -> None:
+        self.focus_previous()
 
 
 class Pas(Static):
@@ -61,27 +110,33 @@ class Pas(Static):
         return self.valeurs[self.index] if self.valeurs else ""
 
     def on_mount(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
-    def rafraichir(self) -> None:
+    def rafraichir(self, actif: bool | None = None) -> None:
+        """`actif` est passé explicitement : au moment du blur, `has_focus` ment encore."""
+        actif = self.has_focus if actif is None else actif
+        fond = f" on {N['panneau']}" if actif else ""
         texte = Text()
-        texte.append(f"  {self.etiquette:<14}", style=N["dim"])
+        texte.append("  ▌ " if actif else "    ", style=(CLIQUABLE if actif else N["cadre"]) + fond)
+        texte.append(f"{self.etiquette:<14}", style=(N["encre"] if actif else N["dim"]) + fond)
         if not self.valeurs:
-            texte.append("— aucune valeur fournie par la session", style=N["faible"])
+            texte.append("— aucune valeur connue", style=N["faible"] + fond)
             self.update(texte)
             return
-        texte.append("◀ ", style=CLIQUABLE if self.has_focus else N["faible"])
-        texte.append(self.valeur, style=N["encre"])
-        texte.append(" ▶", style=CLIQUABLE if self.has_focus else N["faible"])
+        texte.append("◀ ", style=(CLIQUABLE if actif else N["cadre"]) + fond)
+        texte.append(f"{self.valeur:<22}", style=(f"bold {N['encre']}" if actif else N["encre"]) + fond)
+        texte.append(" ▶ ", style=(CLIQUABLE if actif else N["cadre"]) + fond)
         if self.note:
-            texte.append(f"   {self.note}", style=N["faible"])
+            place = max(0, (self.size.width or 90) - 46)
+            note = self.note if len(self.note) <= place else self.note[: max(0, place - 1)] + "…"
+            texte.append(f"  {note}", style=(N["dim"] if actif else N["faible"]) + fond)
         self.update(texte)
 
     def on_focus(self) -> None:
-        self.rafraichir()
+        self.rafraichir(True)
 
     def on_blur(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
     def on_key(self, evenement) -> None:
         if evenement.key in ("left", "right") and self.valeurs:
@@ -103,23 +158,26 @@ class Teinte(Static):
         self.teinte, self.prises = teinte, prises
 
     def on_mount(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
-    def rafraichir(self) -> None:
+    def rafraichir(self, actif: bool | None = None) -> None:
+        actif = self.has_focus if actif is None else actif
         texte = Text()
-        texte.append("  couleur       ", style=N["dim"])
+        texte.append("  ▌ " if actif else "    ", style=CLIQUABLE if actif else N["cadre"])
+        texte.append(f"{'couleur':<14}", style=N["encre"] if actif else N["dim"])
         texte.append("█" * 18, style=couleur_bot(self.teinte))
         unique = "unique dans la salle" if self.teinte not in self.prises else "déjà prise"
-        texte.append(f"  h {self.teinte} · {unique}", style=N["faible"] if unique[0] == "u" else ATTENTION)
-        if self.has_focus:
-            texte.append("   ← → changer", style=N["faible"])
+        texte.append(f"  h {self.teinte} · {unique}",
+                     style=N["dim"] if unique[0] == "u" else ATTENTION)
+        if actif:
+            texte.append("   ← → changer", style=N["dim"])
         self.update(texte)
 
     def on_focus(self) -> None:
-        self.rafraichir()
+        self.rafraichir(True)
 
     def on_blur(self) -> None:
-        self.rafraichir()
+        self.rafraichir(False)
 
     def on_key(self, evenement) -> None:
         if evenement.key in ("left", "right"):
@@ -210,7 +268,7 @@ class TableRegles(Static):
         self.screen.rafraichir_jauge()
 
 
-class EcranFicheBot(Screen):
+class EcranFicheBot(Navigable):
     """S11 : créer ou modifier un bot. ^S écrit les trois fichiers de son dossier."""
 
     CSS = """
@@ -225,6 +283,8 @@ class EcranFicheBot(Screen):
     BINDINGS = [
         Binding("ctrl+s", "enregistrer", "enregistrer", priority=True),
         Binding("escape", "abandonner", "abandonner", priority=True),
+        Binding("up", "champ_precedent", "champ précédent", priority=False),
+        Binding("down", "champ_suivant", "champ suivant", priority=False),
     ]
 
     def __init__(self, racine: Path, nom: str | None, modeles: list[str], prises: set[int]) -> None:
@@ -253,12 +313,18 @@ class EcranFicheBot(Screen):
     def compose(self) -> ComposeResult:
         yield Static(id="entete")
         with VerticalScroll(id="corps"):
-            yield Input(value=self.bot.nom, placeholder="nom", id="nom")
-            yield Input(value=self.bot.role, placeholder="rôle, en deux mots", id="role")
+            yield ChampTexte("nom", self.bot.nom, "nom", "le nom qu'on tapera après @")
+            yield ChampTexte("rôle", self.bot.role, "role", "deux mots : exécution, veille…")
             yield Teinte(self.bot.teinte, self.prises)
-            yield Pas("modèle", self.modeles,
-                      self.modeles.index(self.bot.modele) if self.bot.modele in self.modeles else 0,
-                      note="la liste vient de la session")
+            if self.modeles:
+                yield Pas("modèle", self.modeles,
+                          self.modeles.index(self.bot.modele)
+                          if self.bot.modele in self.modeles else 0,
+                          note="liste fournie par la session ouverte")
+            else:
+                # Aucune session ouverte : la liste est inconnue, on laisse écrire.
+                yield ChampTexte("modèle", self.bot.modele or "", "modele",
+                                 "aucune session ouverte — vide = défaut du fournisseur")
             yield Static(regle("RÔLE", 70, "ce qu'il est, ce qu'il doit faire"))
             yield TextArea(self.role_initial, id="prompt")
             yield TableRegles(bots.lire_regles(self.dossier))
@@ -280,7 +346,7 @@ class EcranFicheBot(Screen):
     def on_mount(self) -> None:
         self.rafraichir_jauge()
         self.query_one("#pied", Static).update(
-            Text("⇥ champ suivant · ^S enregistrer · esc abandonner", style=N["faible"])
+            self.pied_standard()
         )
         self.query_one("#nom", Input).focus()
 
@@ -300,7 +366,8 @@ class EcranFicheBot(Screen):
         texte.append_text(regle("POUVOIR", 70))
         texte.append("  " + "█" * (niveau * 2), style=ATTENTION)
         texte.append(f"  {mots.get(niveau, 'élevé')}\n", style=N["encre"])
-        texte.append(f"  {phrase}\n", style=N["dim"])
+        for morceau in phrase.split(" ; "):
+            texte.append(f"    {morceau.strip().rstrip('.')}\n", style=N["dim"])
         self.query_one("#jauge", Static).update(texte)
 
         nom = self.query_one("#nom", Input).value or "sans-nom"
@@ -357,7 +424,8 @@ class EcranFicheBot(Screen):
             commande=self.bot.commande,
             args=list(self.bot.args),
             env=dict(self.bot.env),
-            modele=pas.get("modèle") or None,
+            modele=(pas.get("modèle") if "modèle" in pas
+                    else self.query_one("#modele", Input).value.strip()) or None,
             fournisseur=self.bot.fournisseur,
             dossier_de_travail="copie" if pas.get("dossier") == "copie isolée" else "commun",
             peut_interpeller=pas.get("interpeller") == "oui",
@@ -435,7 +503,7 @@ class ListeParticipants(Static):
         self.rafraichir()
 
 
-class EcranSalle(Screen):
+class EcranSalle(Navigable):
     """S12 : composer une salle. ^S écrit room.toml et rien d'autre."""
 
     CSS = """
@@ -449,6 +517,8 @@ class EcranSalle(Screen):
     BINDINGS = [
         Binding("ctrl+s", "enregistrer", "enregistrer", priority=True),
         Binding("escape", "abandonner", "abandonner", priority=True),
+        Binding("up", "champ_precedent", "champ précédent", priority=False),
+        Binding("down", "champ_suivant", "champ suivant", priority=False),
     ]
 
     def __init__(self, racine: Path, salle, connus: dict) -> None:
@@ -458,8 +528,9 @@ class EcranSalle(Screen):
     def compose(self) -> ComposeResult:
         yield Static(id="entete")
         with VerticalScroll(id="corps"):
-            yield Input(value=self.salle.nom, placeholder="nom de la salle", id="nom")
-            yield Input(value=str(self.salle.dossier), placeholder="dossier de travail", id="dossier")
+            yield ChampTexte("nom", self.salle.nom, "nom", "le nom de la salle")
+            yield ChampTexte("dossier", str(self.salle.dossier), "dossier",
+                             "où les bots travaillent")
             yield ListeParticipants(self.connus, self.salle.membres)
             yield Static(regle("ENTRE EUX", 70))
             yield Pas("enchaînements", [str(n) for n in range(7)], self.salle.max_rounds,
@@ -481,7 +552,7 @@ class EcranSalle(Screen):
         choisis = self.query_one(ListeParticipants).choisis
         fournisseurs = {self.connus[n].fournisseur for n in choisis}
         texte = Text()
-        texte.append("^S enregistrer · esc abandonner", style=N["faible"])
+        texte.append_text(self.pied_standard())
         texte.append(
             f"    {len(choisis)} bots · {len(fournisseurs)} fournisseur"
             f"{'s' if len(fournisseurs) > 1 else ''}",
@@ -513,7 +584,7 @@ class EcranSalle(Screen):
         self.dismiss(None)
 
 
-class EcranReglages(Screen):
+class EcranReglages(Navigable):
     """Les réglages globaux. Tout est écrit dans un fichier qu'on peut ouvrir à la main."""
 
     CSS = """
@@ -526,6 +597,8 @@ class EcranReglages(Screen):
     BINDINGS = [
         Binding("ctrl+s", "enregistrer", "enregistrer", priority=True),
         Binding("escape", "abandonner", "abandonner", priority=True),
+        Binding("up", "champ_precedent", "champ précédent", priority=False),
+        Binding("down", "champ_suivant", "champ suivant", priority=False),
     ]
 
     def __init__(self, valeurs: dict, connus: dict, modeles: list[str]) -> None:
@@ -566,13 +639,13 @@ class EcranReglages(Screen):
             texte.append(f" · {', '.join('@' + n for n in noms)}\n", style=N["faible"])
         texte.append(
             f"    les modèles viennent des sessions ouvertes"
-            f"{' · ' + str(len(self.modeles)) + ' connus' if self.modeles else ' · aucun pour l instant'}\n",
+            f"{' · ' + str(len(self.modeles)) + ' connus' if self.modeles else ' · aucun pour le moment'}\n",
             style=N["faible"],
         )
         self.query_one("#fournisseurs", Static).update(texte)
         self.query_one("#pied", Static).update(
-            Text(f"^S enregistrer · esc abandonner    tout est écrit dans {config.dossier()}",
-                 style=N["faible"])
+            Text.assemble(self.pied_standard(),
+                          (f"  ·  {config.dossier()}", N["faible"]))
         )
         self.query(Pas).first().focus()
 
@@ -592,44 +665,32 @@ class EcranReglages(Screen):
         self.dismiss(None)
 
 
-class Accueil(App):
-    """S1 et S2 : reprendre, créer, gérer. Rend le nom de la salle à ouvrir, ou rien."""
+class EcranAccueil(Screen):
+    """S1 et S2 : deux listes qu'on parcourt aux flèches, ⇥ passe de l'une à l'autre."""
 
     CSS = """
-    Screen { background: $fond; color: $encre; }
-    #entete, #pied { height: 1; padding: 0 2; color: $dim; background: $panneau; }
+    EcranAccueil { background: $fond; }
+    #entete, #pied { height: 1; padding: 0 2; color: $encre; background: $panneau; }
     #corps { padding: 1 2; }
     """
 
     BINDINGS = [
-        Binding("ctrl+q", "quitter", "quitter", priority=True),
+        Binding("up", "monter", "monter", priority=True),
+        Binding("down", "descendre", "descendre", priority=True),
+        Binding("tab", "section", "changer de liste", priority=True),
+        Binding("enter", "ouvrir", "ouvrir", priority=True),
         Binding("n", "nouvelle_salle", "nouvelle salle"),
         Binding("b", "nouveau_bot", "nouveau bot"),
         Binding("comma", "reglages", "réglages"),
-        Binding("up", "monter", "monter"),
-        Binding("down", "descendre", "descendre"),
-        Binding("enter", "ouvrir", "ouvrir"),
+        Binding("ctrl+q", "quitter", "quitter", priority=True),
     ]
 
-    def __init__(self, racine: Path) -> None:
+    def __init__(self) -> None:
         super().__init__()
-        self.racine = racine
-        self.reglages = config.lire()
-        appliquer_theme(
-            theme_du_terminal() if self.reglages["theme"] == "suit le terminal"
-            else self.reglages["theme"] == "sombre"
-        )
-        self.curseur = 0
+        self.section = "salles"
+        self.curseur = {"salles": 0, "bots": 0}
         self.salles: list[dict] = []
         self.bots: dict = {}
-
-    def get_css_variables(self) -> dict[str, str]:
-        return {
-            **super().get_css_variables(),
-            "fond": N["fond"], "panneau": N["panneau"], "cadre": N["cadre"],
-            "encre": N["encre"], "dim": N["dim"], "faible": N["faible"],
-            "attention": ATTENTION, "cliquable": CLIQUABLE,
-        }
 
     def compose(self) -> ComposeResult:
         yield Static(id="entete")
@@ -640,48 +701,87 @@ class Accueil(App):
         self.recharger()
 
     def recharger(self) -> None:
-        self.salles = resume_salles(self.racine)
-        self.bots = bots.charger_tous(self.racine / "bots")
-        self.curseur = min(self.curseur, max(0, len(self.salles) - 1))
+        self.salles = resume_salles(self.app.racine)
+        self.bots = bots.charger_tous(self.app.racine / "bots")
+        for section, longueur in (("salles", len(self.salles)), ("bots", len(self.bots))):
+            self.curseur[section] = min(self.curseur[section], max(0, longueur - 1))
+        if not self.salles and self.bots:
+            self.section = "bots"
         self.peindre()
+
+    @property
+    def liste(self) -> list:
+        return self.salles if self.section == "salles" else list(self.bots)
 
     def peindre(self) -> None:
         self.query_one("#entete", Static).update(
-            Text.assemble(("◈ quorum", ATTENTION), (" 0.4", N["faible"]))
+            Text.assemble(("◈ quorum", ATTENTION), ("  une salle, plusieurs agents, un seul fil",
+                                                    N["dim"]))
         )
         texte = Text()
         if not self.salles and not self.bots:
             texte.append_text(self.premier_lancement())
         else:
-            texte.append_text(regle("SALLES", 74, str(len(self.salles))))
-            for index, salle in enumerate(self.salles):
-                vise = index == self.curseur
-                texte.append("  ▌ " if vise else "    ", style=CLIQUABLE)
-                texte.append(f"{salle['nom']:<24}", style=N["encre"] if vise else N["dim"])
-                texte.append(
-                    " ".join("@" + m for m in salle["membres"][:3]) or "aucun membre",
-                    style=N["faible"],
-                )
-                texte.append(
-                    f"  ·  {salle['messages']} messages  ·  {salle['quand']}\n", style=N["faible"]
-                )
-            if not self.salles:
-                texte.append("    aucune salle — n pour en créer une\n", style=N["faible"])
+            texte.append_text(self.section_salles())
             texte.append("\n")
-
-            texte.append_text(regle("BOTS", 74, str(len(self.bots))))
-            for nom, bot in self.bots.items():
-                texte.append("    ▌ ", style=couleur_bot(bot.teinte))
-                texte.append(f"@{nom:<14}", style=couleur_bot(bot.teinte))
-                texte.append(f"{bot.role:<16}", style=N["dim"])
-                texte.append(f"{bot.fournisseur}\n", style=N["faible"])
-            if not self.bots:
-                texte.append("    aucun bot — b pour en créer un\n", style=N["faible"])
+            texte.append_text(self.section_bots())
         self.query_one("#corps", Static).update(texte)
-        self.query_one("#pied", Static).update(
-            Text("↑↓ parcourir · ⏎ ouvrir · n nouvelle salle · b nouveau bot · , réglages · ^Q quitter",
-                 style=N["faible"])
-        )
+
+        actions = ("⏎ ouvrir la salle" if self.section == "salles" else "⏎ modifier le bot")
+        pied = Text()
+        pied.append(" ↑↓ ", style=CLIQUABLE)
+        pied.append("parcourir   ", style=N["dim"])
+        pied.append("⇥ ", style=CLIQUABLE)
+        pied.append("liste suivante   ", style=N["dim"])
+        pied.append(actions.split()[0] + " ", style=CLIQUABLE)
+        pied.append(" ".join(actions.split()[1:]) + "   ", style=N["dim"])
+        pied.append("n ", style=CLIQUABLE)
+        pied.append("salle   ", style=N["dim"])
+        pied.append("b ", style=CLIQUABLE)
+        pied.append("bot   ", style=N["dim"])
+        pied.append(", ", style=CLIQUABLE)
+        pied.append("réglages   ", style=N["dim"])
+        pied.append("^Q ", style=CLIQUABLE)
+        pied.append("quitter", style=N["dim"])
+        self.query_one("#pied", Static).update(pied)
+
+    def section_salles(self) -> Text:
+        active = self.section == "salles"
+        texte = regle("SALLES", 74, f"{len(self.salles)} · ⏎ ouvrir" if active else str(len(self.salles)))
+        for index, salle in enumerate(self.salles):
+            vise = active and index == self.curseur["salles"]
+            fond = f" on {N['panneau']}" if vise else ""
+            texte.append("  ▌ " if vise else "    ", style=(CLIQUABLE if vise else N["cadre"]) + fond)
+            texte.append(f"{salle['nom']:<22}", style=(f"bold {N['encre']}" if vise else N["encre"]) + fond)
+            texte.append(f"{' '.join('@' + m for m in salle['membres'][:3]) or 'aucun membre':<26}",
+                         style=(N["dim"] if vise else N["faible"]) + fond)
+            texte.append(f"{salle['messages']} messages · {salle['quand']}".ljust(30) + "\n",
+                         style=(N["dim"] if vise else N["faible"]) + fond)
+        if not self.salles:
+            texte.append("    aucune salle — ", style=N["dim"])
+            texte.append("n", style=CLIQUABLE)
+            texte.append(" pour en créer une\n", style=N["dim"])
+        return texte
+
+    def section_bots(self) -> Text:
+        active = self.section == "bots"
+        noms = list(self.bots)
+        texte = regle("BOTS", 74, f"{len(noms)} · ⏎ modifier" if active else str(len(noms)))
+        for index, nom in enumerate(noms):
+            bot = self.bots[nom]
+            vise = active and index == self.curseur["bots"]
+            fond = f" on {N['panneau']}" if vise else ""
+            texte.append("  ▌ " if vise else "    ", style=(CLIQUABLE if vise else N["cadre"]) + fond)
+            texte.append("▌", style=couleur_bot(bot.teinte) + fond)
+            texte.append(f" @{nom:<14}", style=(f"bold {couleur_bot(bot.teinte)}" if vise
+                                                else couleur_bot(bot.teinte)) + fond)
+            texte.append(f"{bot.role:<16}", style=(N["encre"] if vise else N["dim"]) + fond)
+            texte.append(f"{bot.fournisseur:<20}\n", style=(N["dim"] if vise else N["faible"]) + fond)
+        if not noms:
+            texte.append("    aucun bot — ", style=N["dim"])
+            texte.append("b", style=CLIQUABLE)
+            texte.append(" pour en créer un\n", style=N["dim"])
+        return texte
 
     def premier_lancement(self) -> Text:
         """S2 : le vide. On explique ce qu'est une salle, et on propose un seul geste."""
@@ -692,45 +792,84 @@ class Accueil(App):
             "│ et exécute   │  │ contredit    │  │ ce qui compte │",
             "╰──────────────╯  ╰──────────────╯  ╰───────────────╯",
         ):
-            texte.append(f"  {ligne}\n", style=N["cadre"])
+            texte.append(f"  {ligne}\n", style=N["dim"])
         texte.append("\n  Une salle réunit tes bots dans un seul fil.\n", style=N["encre"])
         texte.append(
             "  Un bot, c'est un rôle, un modèle, des outils et des permissions.\n"
             "  Commence par un : on en ajoute autant qu'on veut ensuite.\n\n",
             style=N["dim"],
         )
-        texte.append("  ＋ créer mon premier bot", style=CLIQUABLE)
-        texte.append("  b\n", style=N["faible"])
+        texte.append("  ＋ créer mon premier bot   ", style=f"bold {CLIQUABLE}")
+        texte.append("b\n", style=N["encre"])
         return texte
 
+    def action_section(self) -> None:
+        self.section = "bots" if self.section == "salles" else "salles"
+        self.peindre()
+
     def action_monter(self) -> None:
-        if self.salles:
-            self.curseur = (self.curseur - 1) % len(self.salles)
+        if self.liste:
+            self.curseur[self.section] = (self.curseur[self.section] - 1) % len(self.liste)
             self.peindre()
 
     def action_descendre(self) -> None:
-        if self.salles:
-            self.curseur = (self.curseur + 1) % len(self.salles)
+        if self.liste:
+            self.curseur[self.section] = (self.curseur[self.section] + 1) % len(self.liste)
             self.peindre()
 
     def action_ouvrir(self) -> None:
-        if self.salles:
-            self.exit(self.salles[self.curseur]["nom"])
+        if not self.liste:
+            return
+        if self.section == "salles":
+            self.app.exit(self.salles[self.curseur["salles"]]["nom"])
+        else:
+            self.modifier_bot(list(self.bots)[self.curseur["bots"]])
+
+    def modifier_bot(self, nom: str | None) -> None:
+        prises = {b.teinte for n, b in self.bots.items() if n != nom}
+        self.app.push_screen(EcranFicheBot(self.app.racine, nom, [], prises),
+                             lambda _: self.recharger())
 
     def action_quitter(self) -> None:
-        self.exit(None)
+        self.app.exit(None)
 
     def action_nouvelle_salle(self) -> None:
         vide = Salle(nom="nouvelle", dossier=Path.cwd(), membres=[],
-                     racine=self.racine / "rooms" / "nouvelle")
-        self.push_screen(EcranSalle(self.racine, vide, self.bots), lambda _: self.recharger())
+                     racine=self.app.racine / "rooms" / "nouvelle")
+        self.app.push_screen(EcranSalle(self.app.racine, vide, self.bots),
+                             lambda _: self.recharger())
 
     def action_nouveau_bot(self) -> None:
-        prises = {b.teinte for b in self.bots.values()}
-        self.push_screen(EcranFicheBot(self.racine, None, [], prises), lambda _: self.recharger())
+        self.modifier_bot(None)
 
     def action_reglages(self) -> None:
-        self.push_screen(EcranReglages(self.reglages, self.bots, []), self.reglages_changes)
+        self.app.push_screen(
+            EcranReglages(self.app.reglages, self.bots, []), self.app.reglages_changes
+        )
+
+
+class Accueil(App):
+    """L'application d'accueil. Rend le nom de la salle à ouvrir, ou rien."""
+
+    def __init__(self, racine: Path) -> None:
+        super().__init__()
+        self.racine = racine
+        self.reglages = config.lire()
+        appliquer_theme(
+            theme_du_terminal() if self.reglages["theme"] == "suit le terminal"
+            else self.reglages["theme"] == "sombre"
+        )
+
+    def get_css_variables(self) -> dict[str, str]:
+        return {
+            **super().get_css_variables(),
+            "fond": N["fond"], "panneau": N["panneau"], "cadre": N["cadre"],
+            "encre": N["encre"], "dim": N["dim"], "faible": N["faible"],
+            "attention": ATTENTION, "cliquable": CLIQUABLE,
+        }
+
+    def on_mount(self) -> None:
+        self.push_screen(EcranAccueil())
 
     def reglages_changes(self, valeurs: dict | None) -> None:
         if not valeurs:
@@ -741,4 +880,6 @@ class Accueil(App):
             else valeurs["theme"] == "sombre"
         )
         self.refresh_css()
-        self.peindre()
+        for ecran in self.screen_stack:
+            if isinstance(ecran, EcranAccueil):
+                ecran.peindre()
