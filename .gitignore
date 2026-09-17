@@ -5,3 +5,7 @@ __pycache__/
 runtime/
 .home/
 dist/
+
+# the set the recordings are shot on — rebuilt by demo/build.py
+demo/root/
+demo/out/

@@ -1,0 +1,32 @@
+#!/usr/bin/env python3
+"""ffmpeg, minus the one flag that breaks the recordings.
+
+vhs 0.12 — the latest there is — still assembles its frames with `-vsync`, which ffmpeg 9
+removed. The encode then fails, vhs reports nothing, and no file appears: the tape looks
+like it ran. This sits first on PATH during a render, rewrites that one flag, and hands
+everything else to the real binary untouched.
+
+Delete it the day vhs ships `-fps_mode`.
+"""
+
+import os
+import shutil
+import sys
+
+MODES = {"0": "passthrough", "1": "cfr", "2": "vfr", "-1": "auto",
+         "passthrough": "passthrough", "cfr": "cfr", "vfr": "vfr", "auto": "auto"}
+
+arguments, given = [], iter(sys.argv[1:])
+for argument in given:
+    if argument == "-vsync":
+        arguments += ["-fps_mode", MODES.get(next(given, "auto"), "auto")]
+    else:
+        arguments.append(argument)
+
+here = os.path.dirname(os.path.abspath(__file__))
+elsewhere = [p for p in os.environ.get("PATH", "").split(os.pathsep)
+             if p and os.path.abspath(p) != here]
+real = shutil.which("ffmpeg", path=os.pathsep.join(elsewhere))
+if not real:
+    sys.exit("ffmpeg not found")
+os.execv(real, ["ffmpeg"] + arguments)

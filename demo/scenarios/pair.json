@@ -1,0 +1,107 @@
+{
+  "scout": [
+    [
+      {
+        "think": "**Reading The Validation Path**\nBefore I answer anything I want to see how a token is actually checked.",
+        "pause": 0.8
+      },
+      {
+        "tool": "reads src/auth/jwt.py",
+        "kind": "read",
+        "path": "~/dev/atlas/src/auth/jwt.py",
+        "runs": 0.5,
+        "output": "\ndef verify(token):\n    claims = decode(token, KEY)\n    if claims['exp'] < time.time():\n        raise Expired(token)",
+        "late": 1.2
+      },
+      {
+        "tool": "greps \"decode(\" across src/",
+        "kind": "read",
+        "runs": 0.45,
+        "output": "\nsrc/auth/jwt.py:9\nsrc/auth/legacy/session.py:6",
+        "late": 1.2
+      },
+      {
+        "think": "**Two Implementations**\nThere is a second verify() under legacy/, and it is three lines shorter than the first."
+      },
+      {
+        "tool": "reads src/auth/legacy/session.py",
+        "kind": "read",
+        "path": "~/dev/atlas/src/auth/legacy/session.py",
+        "runs": 0.5,
+        "output": "\ndef verify(token):\n    claims = decode(token, KEY)\n    # no expiry check\n    return claims",
+        "late": 1.2
+      },
+      {
+        "say": "Two validation paths. `legacy/session.py` decodes the token and hands back the claims without ever looking at `exp` — and that is still what `/v1/refresh` calls."
+      }
+    ],
+    [
+      {
+        "think": "**Looking For A Test**\nSearching the suite for anything that exercises the refresh route.",
+        "pause": 0.6
+      },
+      {
+        "tool": "greps \"refresh\" across tests/",
+        "kind": "read",
+        "runs": 0.5,
+        "output": "\ntests/auth/test_refresh.py:8: @pytest.mark.skip(reason='needs a rebuilt env')",
+        "late": 1.2
+      },
+      {
+        "say": "@forge nothing covers `/v1/refresh` — the single skipped test is exactly that route."
+      }
+    ]
+  ],
+  "forge": [
+    [
+      {
+        "think": "**Running The Auth Tests**\nI will run the suite first and read what it really covers.",
+        "pause": 0.6
+      },
+      {
+        "tool": "pytest -q tests/auth",
+        "kind": "execute",
+        "runs": 1.2,
+        "late": 1.5,
+        "output": "\n12 passed, 1 skipped in 0.68s\nSKIPPED [1] tests/auth/test_refresh.py:8: needs a rebuilt env"
+      },
+      {
+        "think": "**A Stale Environment**\nThe skip comes from a virtualenv built against the old layout.",
+        "pause": 1.4
+      },
+      {
+        "ask": "rm -rf .venv && uv sync",
+        "raw": "rm -rf .venv && uv sync --refresh --all-extras",
+        "pause": 0.7
+      },
+      {
+        "rejected": [
+          {
+            "say": "Cancelled — I am leaving `.venv` alone.",
+            "pause": 0.5
+          }
+        ]
+      },
+      {
+        "allowed": [
+          {
+            "say": "Rebuilt, and the skip is gone.",
+            "pause": 0.5
+          }
+        ]
+      }
+    ],
+    [
+      {
+        "say": "Understood — `uv sync --reinstall` rebuilds it in place, nothing gets deleted.",
+        "pause": 0.6
+      }
+    ],
+    [
+      {
+        "say": "Confirmed, nothing covers it. I can add `tests/auth/test_refresh.py` in one commit — say the word.",
+        "pause": 0.7
+      }
+    ]
+  ]
+}
