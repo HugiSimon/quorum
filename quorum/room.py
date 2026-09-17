@@ -211,6 +211,54 @@ def recipients(text: str, members: list[str]) -> list[str]:
     return targets or list(members)
 
 
+def paint_mentions(text, colors: dict[str, str]) -> None:
+    """Every @name that reaches a real bot wears that bot's color — in place, on a Text.
+
+    What is left alone matters as much: an @ nobody answers to must not look like one that
+    does. That is the visible half of what `roster` tells the bots every turn.
+    """
+    for match in MENTION_PATTERN.finditer(text.plain):
+        color = colors.get(match.group(1).lower())
+        if color:
+            text.stylize(f"bold {color}", match.start(), match.end())
+
+
+def mention_query(value: str, cursor: int) -> str | None:
+    """The @token the cursor sits inside, or None — what the completion list is filtering on.
+
+    An @ glued to the end of a word (an email address, a decorator) is not a mention, and
+    neither is anything past the first space: those are two tokens, not one long name.
+    """
+    head = value[:cursor]
+    at = head.rfind("@")
+    if at < 0 or (at and not head[at - 1].isspace()):
+        return None
+    token = head[at + 1:]
+    return None if any(c.isspace() for c in token) else token
+
+
+def completions(
+    query: str, names: list[str], paths: list[str], keep: int = 6
+) -> list[tuple[str, str]]:
+    """What an @ can reach: the room's bots first, then the project's files.
+
+    The bots come first whatever the score — @ is their gesture, and there are five of them
+    against ten thousand files. Returns (text, kind) pairs.
+    """
+    from textual.fuzzy import Matcher
+
+    if not query:
+        bots = list(names)
+        rest = paths
+    else:
+        matcher = Matcher(query)
+        bots = [n for n in names if matcher.match(n)]
+        hits = [(matcher.match(path), path) for path in paths]
+        rest = [path for score, path in sorted(hits, key=lambda hit: -hit[0]) if score]
+    found = [(name, "bot") for name in bots[:keep]]
+    return found + [(path, "file") for path in rest[: keep - len(found)]]
+
+
 def fingerprint(text: str) -> str:
     """A message signature, case- and space-insensitive — to spot a bot going in circles."""
     return hashlib.sha1(" ".join(text.lower().split()).encode()).hexdigest()
@@ -364,8 +412,34 @@ if __name__ == "__main__":
         assert load_room(home, "here", home).folder == elsewhere.resolve(), \
             "opened from somewhere else, a pinned room does not move"
 
+    assert mention_query("@for", 4) == "for", "the token the cursor sits in"
+    assert mention_query("hello @for", 10) == "for"
+    assert mention_query("@forge run", 4) == "for", "the cursor mid-token, not at the end"
+    assert mention_query("@forge run", 10) is None, "past the space, it is another token"
+    assert mention_query("mail@example.com", 16) is None, "an @ glued to a word is not a mention"
+    assert mention_query("nothing", 7) is None
+    assert mention_query("@", 1) == "", "a bare @ offers everything"
+
+    found = completions("fo", ["forge", "sonar"], ["src/forms.py", "README.md"])
+    assert found[0] == ("forge", "bot"), found
+    assert ("src/forms.py", "file") in found and ("README.md", "file") not in found, found
+    assert completions("", ["forge"], ["a.py"], keep=1) == [("forge", "bot")], \
+        "the bots come first: @ is their gesture"
+    assert completions("zz", ["forge"], ["a.py"]) == []
+
+    from rich.text import Text
+
+    painted = Text("@forge and @ghost, see @Forge")
+    paint_mentions(painted, {"forge": "#7fbf6a"})
+    styled = {str(span.style) for span in painted.spans}
+    assert styled == {"bold #7fbf6a"}, styled
+    assert len(painted.spans) == 2, "the known name, twice, whatever its case"
+    assert painted.spans[0].start == 0 and painted.spans[0].end == 6, painted.spans
+    assert all(span.start != 11 for span in painted.spans), "@ghost reaches nobody: no color"
+
     summary = thread_summary(entries)
     assert "[room resume]" in summary and "3 messages" in summary, summary
     assert "Do not call any tool" in summary
 
-    print("room: recipients ok · delta ok · isolation ok · handoffs ok · fingerprint ok · steps ok · folder ok · resume ok")
+    print("room: recipients ok · delta ok · isolation ok · handoffs ok · fingerprint ok"
+          " · steps ok · folder ok · resume ok · mentions ok · completion ok")

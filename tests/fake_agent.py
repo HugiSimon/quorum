@@ -134,8 +134,12 @@ def main() -> None:
                     "status": "completed", "kind": "read"})
             send({"jsonrpc": "2.0", "id": 0, "method": "session/request_permission", "params": {
                 "sessionId": SESSION,
+                # The real agent shortens the title and keeps the command in rawInput:
+                # what you allow must be readable, not the abbreviation.
                 "toolCall": {"toolCallId": "run_shell_command__call_0",
-                             "title": "rm -rf .venv && uv sync"},
+                             "title": "rm -rf .venv && uv sync",
+                             "rawInput": {"command": "rm -rf .venv && uv sync "
+                                                     "--refresh --all-extras"}},
                 # Order deliberately taken from the real agent: the widest permission comes
                 # first.
                 "options": [

@@ -29,6 +29,25 @@ async def main() -> None:
             await wait_for(pilot, lambda: one.ready and two.ready, "both sessions open")
             await input_ready(pilot, app)
 
+            # Typing @ offers the room, then the project's files — and ⇥ writes the name.
+            app.paths = ["src/auth.py"]
+            await pilot.press("at", "f")
+            await wait_for(pilot, lambda: app.picker.rows, "the @ list")
+            assert app.picker.rows[0] == ("fake1", "bot"), app.picker.rows
+            assert app.picker.display and [k for _, k in app.picker.rows].count("bot") == 2
+            await pilot.press("down")
+            assert app.picker.cursor == 1, "the arrows walk the list, they do not move the cursor"
+            await pilot.press("up")
+            await pilot.press("tab")
+            assert app.query_one(Input).value == "@fake1 ", app.query_one(Input).value
+            assert not app.picker.rows and not app.picker.display, "inserting closes the list"
+            # A file keeps its @: recipients() only matches members, so it wakes nobody.
+            await pilot.press("at", "a", "u")
+            await wait_for(pilot, lambda: app.picker.rows, "the file list")
+            assert app.picker.rows == [("src/auth.py", "file")], app.picker.rows
+            app.query_one(Input).value = ""
+            app.picker.close()
+
             # An explicit mention only wakes one bot.
             app.query_one(Input).value = "@fake1 PERM delete .venv"
             await pilot.press("enter")
@@ -38,6 +57,11 @@ async def main() -> None:
                 ["allow_once", "allow_always", "reject_once"], \
                 "key 1 must never land on the widest permission"
             assert one.panel.options[0]["name"] == "Allow", "the agent's label, as it is"
+            # A tool line is cut to one row; a permission request never is — you cannot
+            # allow a command you have not read whole.
+            asked = one.panel.render().plain
+            assert "--refresh --all-extras" in asked, f"the whole command, not the title: {asked}"
+            assert "…" not in asked, f"nothing clipped in a decision: {asked}"
             assert one.bubble.tools and one.bubble.tools[0]["title"].startswith("rm -rf")
             assert one.bubble.tools[0]["family"] == "shell", one.bubble.tools[0]
             one.panel.choose(one.panel.options[0])
@@ -102,7 +126,7 @@ async def main() -> None:
                 )
                 assert not participant.memory_lost
             assert not cold.query(".expiry"), "nothing expired: no S10 panel"
-    print("test_room_app: mention ok · parallel ok · 2 permissions ok · persistent thread ok")
+    print("test_room_app: @ list ok · mention ok · parallel ok · 2 permissions ok · whole command ok · persistent thread ok")
 
 
 if __name__ == "__main__":

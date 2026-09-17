@@ -18,6 +18,8 @@ DEFAULTS = {
     "density": "automatic",
     "ask_outside_folder": True,
     "keep_outputs": True,
+    # How many bots may work at once. "all" is the room as it was: everyone answers together.
+    "parallel": "all",
 }
 
 STARTER = Path(__file__).with_name("starter")

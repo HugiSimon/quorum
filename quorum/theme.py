@@ -91,9 +91,12 @@ FAMILIES = {
     "execute": "shell", "fetch": "net", "think": "think",
 }
 
-# Three movements, not one more. Braille has an honest width: it is the safest.
-ANIM_THINK = "◜◠◝◞◡◟"
-ANIM_WORK = "⡿⡀⡄⡆⡇⡏⡟⡿⡟⡏⡇⡆⡄"
+# Three movements, not one more. Braille has an honest width: it is the safest — the
+# quadrant arcs it replaced sit at different heights from one font to the next, and that
+# reads as a wobble rather than a rotation.
+ANIM_THINK = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+# Heavier, and turning the other way: a running tool must not look like a thinking bot.
+ANIM_WORK = "⣾⣽⣻⢿⡿⣟⣯⣷"
 
 
 def oklch_to_srgb(lightness: float, chroma: float, hue: float) -> tuple[float, float, float]:
@@ -139,6 +142,22 @@ def bot_color(hue: float, dark: bool | None = None) -> str:
 def hue_reserved(hue: float) -> bool:
     """True if the hue belongs to a band reserved for the interface."""
     return any(low <= hue % 360 <= high for low, high in (BAND_ATTENTION, BAND_CLICKABLE))
+
+
+def clip(line: str, width: int) -> str:
+    """One line, one row. A four-hundred-character command must not eat the thread.
+
+    Cell width, not character count: a path with an accent or a CJK name would otherwise
+    overflow the row it was measured into.
+    """
+    from rich.cells import cell_len
+
+    if cell_len(line) <= width:
+        return line
+    cut = line
+    while cut and cell_len(cut) > width - 1:
+        cut = cut[:-1]
+    return cut + "…"
 
 
 def divider(title: str, width: int, note: str = ""):
@@ -188,6 +207,16 @@ if __name__ == "__main__":
     for name, hue in (("sonar", 250), ("forge", 150), ("lex", 305), ("audit", 18), ("pico", 195)):
         assert not hue_reserved(hue), f"{name} steals a reserved band"
         print(f"{name:6} h{hue:4}  dark {bot_color(hue)}  light {bot_color(hue, False)}")
+
+    # clip: the ellipsis is part of the budget, never one cell past it.
+    assert clip("uv sync", 20) == "uv sync"
+    assert clip("0123456789", 10) == "0123456789", "exactly the width fits as it is"
+    assert clip("0123456789", 9) == "01234567…"
+    assert clip("0123456789a", 10) == "012345678…"
+    from rich.cells import cell_len
+    for line in ("rm -rf .venv && uv sync", "résumé/naïve.py", "読み込み中のファイル.py"):
+        for width in range(4, 26):
+            assert cell_len(clip(line, width)) <= width, (line, width)
 
     apply_theme(False)
     assert N["bg"] == NEUTRALS_LIGHT["bg"] and not is_dark()

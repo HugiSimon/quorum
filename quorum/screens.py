@@ -32,6 +32,7 @@ from .theme import (
 )
 
 DECISIONS = ("allow", "ask_user", "deny")
+PARALLEL = ["all", "1", "2", "3", "4"]
 
 
 def _pick(values: list[str], value: str) -> int:
@@ -634,6 +635,10 @@ class SettingsScreen(Navigable):
             yield Step("density", ["automatic", "airy", "compact"],
                        _pick(["automatic", "airy", "compact"], self.values["density"]),
                        note="compact under 100 columns when automatic")
+            yield Static(divider("ROUNDS", 70,
+                                 "a bot named inside a round is answered in the next one"))
+            yield Step("parallel", PARALLEL, _pick(PARALLEL, str(self.values["parallel"])),
+                       note="bots working at once, never mid-round")
             yield Static(divider("GUARDS", 70, "what each switch costs"))
             yield Step("outside folder", ["ask me", "let it go"],
                        0 if self.values["ask_outside_folder"] else 1,
@@ -675,6 +680,7 @@ class SettingsScreen(Navigable):
             "density": steps["density"],
             "ask_outside_folder": steps["outside folder"] == "ask me",
             "keep_outputs": steps["outputs"] == "keep",
+            "parallel": steps["parallel"],
         })
         self.dismiss(config.read())
 

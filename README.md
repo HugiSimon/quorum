@@ -15,7 +15,7 @@ refuses, or refuses and explains why.
     @scout look at how we validate tokens, and @forge run the auth tests.
     Change nothing for now.
 
-  ▌ @scout  research · 14:02  ◐ thinking · 0:18
+  ▌ @scout  research · 14:02  ⠹ thinking · 0:18
     ┊ 6 earlier tools
     ▸ fs · reads src/auth/jwt.py              ✓ 0.4s
         def verify(token): …
@@ -29,7 +29,7 @@ refuses, or refuses and explains why.
     1-9 decide · r refuse with a reason · esc back to typing
 
 ◇ type while they work…▏
-◐@scout  ◆@forge                              ^C interrupt · 0:18
+⠹@scout  ◆@forge                              ^C interrupt · 0:18
 ```
 
 ## Install
@@ -81,11 +81,16 @@ quorum review          # open a room directly
 **At home** — `↑↓` walk · `⏎` open · `n` new room · `b` new bot ·
 `,` settings · `^Q` quit.
 
-**In a room** — `⏎` send · `1`…`9` decide a permission · `r` refuse with a reason ·
+**In a room** — `⏎` send · `@` propose the bots then the project's files, `↑↓` walk and
+`⇥` insert · `1`…`9` decide a permission · `r` refuse with a reason ·
 `^C` interrupt the turn · **click a block** to see how it was written ·
 `^R` watch the last active bot work · `^B` its card ·
 `^O` set up the room · `^G` settings · `end` follow the stream ·
 `^Q` back to home.
+
+A mention wears the color of the bot it reaches — as you type it, and in the thread,
+including in what the bots write to each other. An `@` that matches nobody stays plain ink:
+that is what tells you it will be read by no one.
 
 **In a bot card** — `⇥` next field · `^S` save · `esc` discard. In the permission table:
 `a` add · `e` edit the pattern · `d` change the decision · `x` remove · `⇧↑↓` reorder.
@@ -161,7 +166,10 @@ These points come from trials against the real protocol, not from the documentat
   For Gemini, we pick it up from the local telemetry log — it arrives **~5 s after** the
   tool ends, in one block. The interface holds that delay (`✓ 0.6s · output on the way`)
   and says so when it never comes. Without that log, or with another provider, the thread
-  shows the commands without their answers.
+  shows the commands without their answers. While a bot works, a tool takes **one row and
+  three lines** whatever it ran — the whole of it is in `^R`. A permission request is the
+  exception: it is never cut, and it shows the command from `rawInput` rather than the
+  agent's shortened title. You cannot allow what you have not read.
 - **`session/load` resumes nothing with Gemini CLI 0.59.** The agent does announce
   `loadSession: true`, but answers "No previous sessions found for this project": the
   session is never written to disk. The resume code is there and tested; meanwhile, the
@@ -170,6 +178,9 @@ These points come from trials against the real protocol, not from the documentat
   `{"mcp": {"allowed": []}}` cuts the MCP servers, and `-e` with no valid extension cuts
   the extensions. The A2A servers of the user settings, however, still load.
 - **The token count only exists at the end of a turn.** Nothing to show during it.
+- **Bots answer in parallel, rounds do not.** `parallel` in the settings caps how many work
+  at once (`all` by default); a bot named *inside* a round is answered in the next one, never
+  mid-round. A queued bot opens its block when its slot does.
 - **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
   titles; the body opens in the reasoning screen.
 - **A policy file the engine cannot read is not an error.** `[[rules]]` instead of `[[rule]]`,

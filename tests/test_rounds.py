@@ -39,6 +39,10 @@ async def budget_scenario() -> None:
             await pilot.press("enter")
             await wait_for(pilot, lambda: app.conversation.done(), "the conversation stops", 1500)
 
+            # Nothing was scrolled: the thread followed by itself, and says nothing about it.
+            assert app.unread == 0, app.unread
+            assert not app.query_one("#backlog").display, "no backlog banner when following"
+
             thread = thread_lines(app)
             assert "round 2 · @fake2" in thread, thread
             assert "chaining budget spent (1)" in thread, thread
@@ -133,12 +137,44 @@ async def interruption_scenario() -> None:
             assert one.bubble.body.strip(), one.bubble.body
 
 
+async def parallel_scenario() -> None:
+    """The settings cap how many bots work at once; the round still finishes as a whole."""
+    with tempfile.TemporaryDirectory() as tmp:
+        app, room = await open_room(Path(tmp), max_rounds=0, relay=False)
+        app.settings = {**app.settings, "parallel": "1"}
+        async with app.run_test() as pilot:
+            one, two = app.participants["fake1"], app.participants["fake2"]
+            await wait_for(pilot, lambda: one.ready and two.ready, "the sessions")
+            await input_ready(pilot, app)
+            assert app.at_once == 1, app.at_once
+
+            # No mention: both are targeted, but only one may hold a slot at a time.
+            app.query_one("#message", Input).value = "PERM and what do you think?"
+            await pilot.press("enter")
+            await wait_for(pilot, lambda: any(p.panel is not None for p in (one, two)),
+                           "the first bot asks")
+            live = next(p for p in (one, two) if p.panel is not None)
+            queued = next(p for p in (one, two) if p is not live)
+            assert queued.bubble is None, "a bot still queued has no block of its own yet"
+            assert "waits for a slot" in thread_lines(app), thread_lines(app)
+
+            live.panel.choose(live.panel.options[0])
+            await wait_for(pilot, lambda: queued.panel is not None, "the slot passes on")
+            assert queued.bubble is not None, "its block opens when its slot does"
+            queued.panel.choose(queued.panel.options[0])
+            await wait_for(pilot, lambda: app.conversation.done(), "the round ends", 1500)
+
+            authors = [e.author for e in Transcript(room.root / "transcript.jsonl").entries]
+            assert authors.count("fake1") == 1 and authors.count("fake2") == 1, authors
+
+
 async def main() -> None:
     await budget_scenario()
     await repetition_scenario()
     await commented_refusal_scenario()
     await interruption_scenario()
-    print("test_rounds: budget ok · repetition ok · commented refusal ok · interruption ok")
+    await parallel_scenario()
+    print("test_rounds: budget ok · repetition ok · commented refusal ok · interruption ok · parallel cap ok")
 
 
 if __name__ == "__main__":

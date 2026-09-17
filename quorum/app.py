@@ -12,6 +12,7 @@ import sys
 import time
 from pathlib import Path
 
+from rich.highlighter import Highlighter
 from rich.text import Text
 from textual.app import App, ComposeResult
 from textual.screen import Screen
@@ -37,6 +38,9 @@ from .room import (
     fingerprint,
     prompt_for,
     handoffs,
+    completions,
+    mention_query,
+    paint_mentions,
 )
 from . import settings as config
 from . import telemetry
@@ -44,6 +48,7 @@ from .telemetry import GeminiOutputs, short_id
 from .theme import (
     ANIM_THINK,
     apply_theme,
+    clip,
     ANIM_WORK,
     ATTENTION,
     CLICKABLE,
@@ -62,6 +67,21 @@ LIVE = ("thinking", "running", "asking")
 # How many tool lines a working bot keeps on screen. The rest is one counter, and all of it
 # stays in the reasoning screen.
 TOOL_WINDOW = 3
+
+# And how tall each of those lines may be: capping their number was not enough, a single
+# four-hundred-character command wrapped over six rows and buried the answer anyway.
+LIVE_OUTPUT = 3
+FULL_OUTPUT = 12
+GUTTER = "  ▸ "
+OUTPUT_INDENT = "      "
+
+# One beat, and nothing in it walks the thread — that walk is what used to cap the rate.
+# ponytail: 12 fps by hand; textual caps at 60, raise it the day a terminal keeps up.
+ANIM_RATE = 0.08
+
+# What the @ list offers at once, and how far we look for files.
+PICKER_ROWS = 6
+FILE_CAP = 3000
 
 # Beyond that, we consider the memory lost rather than leaving the room shut.
 RESUME_TIMEOUT = 30.0
@@ -128,9 +148,14 @@ class Bubble(Static):
         clock: str,
         state: str | None = None,
         start: float | None = None,
+        mention_colors: dict[str, str] | None = None,
     ) -> None:
         super().__init__()
         self.author, self.role, self.color, self.clock = author, role, color, clock
+        # The room's colors, by reference: a theme switch reaches the bubbles already on
+        # screen without any of them being redrawn from the outside. Not `colors`: textual
+        # gives every widget one of those.
+        self.mention_colors = {} if mention_colors is None else mention_colors
         self.state = state
         self.start = start
         self.body = ""
@@ -173,8 +198,11 @@ class Bubble(Static):
             for tool in shown_tools:
                 text.append_text(self.tool_line(tool, output=tool is self.tools[-1]))
 
+        body = Text()
         for line in self.body.rstrip().splitlines():
-            text.append(f"    {line}\n", style=N["ink"])
+            body.append(f"    {line}\n", style=N["ink"])
+        paint_mentions(body, self.mention_colors)
+        text.append_text(body)
 
         # While it works we show the steps; once the message is written, it stands alone.
         if self.thinking_visible and self.steps and not done and not self.compact:
@@ -204,37 +232,72 @@ class Bubble(Static):
         if self.owner:
             self.app.open_thinking(self.owner, self)
 
-    def tool_line(self, tool: dict, output: bool = True) -> Text:
+    @property
+    def room_for(self) -> int:
+        """The width one tool row may take. Unmounted — a check calling draw() — assume 100."""
+        return max(40, self.content_size.width or 100)
+
+    def tool_line(self, tool: dict, output: bool = True, full: bool = False) -> Text:
         """A tool line: family · title · duration, and the fate of its output.
 
         The output does not arrive with the end of the tool: one or two seconds later,
         through the local log. "output on the way" is the normal state, not an anomaly.
+
+        In the thread a tool takes one row and three lines of output, whatever it ran:
+        `full` is the reasoning screen, where nothing is cut and everything is readable.
         """
         braille = ANIM_WORK[self.phase % len(ANIM_WORK)]
+        width = self.room_for
         text = Text()
-        text.append("  ▸ ", style=self.color)
-        if tool.get("family"):
-            text.append(f"{tool['family']} · ", style=N["faint"])
-        text.append(tool["title"], style=N["dim"])
+        text.append(GUTTER, style=self.color)
+        head = f"{tool['family']} · " if tool.get("family") else ""
+
         if not tool.get("end"):
-            text.append(f"  {braille}\n", style=N["faint"])
+            spin = f"  {braille}"
+            title = tool["title"] if full else clip(
+                tool["title"], max(8, width - len(GUTTER) - len(head) - len(spin))
+            )
+            if head:
+                text.append(head, style=N["faint"])
+            text.append(title, style=N["dim"])
+            text.append(f"{spin}\n", style=N["faint"])
             return text
 
-        text.append(f"  ✓ {tool['end'] - tool['start']:.1f}s", style=N["faint"])
+        # The tail is written first: what is clipped is the title, never the duration or
+        # the fate of the output — those are the reason the line is there.
+        seconds = f"  ✓ {tool['end'] - tool['start']:.1f}s"
         if not output:
-            text.append("\n")
-            return text
-        if tool.get("output") is not None:
+            tail, rest = "\n", []
+        elif tool.get("output") is not None:
             late = tool.get("arrival", tool["end"]) - tool["end"]
-            text.append(f" · output +{late:.1f}s\n", style=N["faint"])
-            for line in str(tool["output"]).rstrip().splitlines()[:12]:
-                text.append(f"      {line}\n", style=N["dim"])
+            tail = f" · output +{late:.1f}s\n"
+            rest = str(tool["output"]).rstrip().splitlines()
         elif tool.get("awaiting_output"):
-            text.append(f" · output on the way {braille}\n", style=N["faint"])
+            tail, rest = f" · output on the way {braille}\n", []
         elif tool.get("output_lost"):
-            text.append(" · output never came\n", style=N["faint"])
+            tail, rest = " · output never came\n", []
         else:
-            text.append("\n")
+            tail, rest = "\n", []
+
+        # The gutter, the family, the duration and the fate of the output are all fixed
+        # width: what is left over is the title's, and the title is what gets cut.
+        title = tool["title"]
+        if not full:
+            used = len(GUTTER) + len(head) + len(seconds) + len(tail.rstrip("\n"))
+            title = clip(title, max(8, width - used))
+        if head:
+            text.append(head, style=N["faint"])
+        text.append(title, style=N["dim"])
+        text.append(seconds, style=N["faint"])
+        text.append(tail, style=N["faint"])
+
+        keep = FULL_OUTPUT if full else LIVE_OUTPUT
+        for line in rest[:keep]:
+            shown = line if full else clip(line, width - len(OUTPUT_INDENT))
+            text.append(f"{OUTPUT_INDENT}{shown}\n", style=N["dim"])
+        if len(rest) > keep and not full:
+            text.append(f"{OUTPUT_INDENT}… {len(rest) - keep} more lines · ^R\n",
+                        style=N["faint"])
         return text
 
     def redraw(self) -> None:
@@ -261,6 +324,9 @@ class PermissionPanel(Static):
 
     Nothing is hard-coded: the number of options varies from one tool to the next and from
     one provider to another. Several bots may each have one — ⇥ moves to the next.
+
+    **Nothing here is ever clipped.** A tool line in the thread is cut to one row because it
+    is a trace; this is a decision, and you cannot allow a command you have not read whole.
     """
 
     can_focus = True
@@ -281,6 +347,19 @@ class PermissionPanel(Static):
 
     def on_mount(self) -> None:
         self.redraw()
+
+    @property
+    def detail(self) -> str:
+        """What the agent is really asking for, from `rawInput` — the whole of it.
+
+        Gemini's `title` for a shell call is an abbreviation; the command lives here. A tool
+        that carries none of these fields has nothing to add, and the title stands alone.
+        """
+        raw = self.call.get("rawInput") or {}
+        for key in ("command", "file_path", "path", "url", "prompt"):
+            if raw.get(key):
+                return str(raw[key]).strip()
+        return ""
 
     def redraw(self) -> None:
         if not self.is_mounted:   # still in the queue: nothing to paint yet
@@ -303,8 +382,14 @@ class PermissionPanel(Static):
         if self.queued:
             text.append(f"   · {self.queued} more waiting", style=N["dim"])
         text.append("\n", style=N["faint"])
-        if title:
-            text.append(f"    {title}\n", style=N["ink"])
+        # The agent's title is usually an abbreviation of what it is really asking for: when
+        # rawInput carries the whole of it, that replaces the title rather than repeating it.
+        detail = self.detail
+        lines = detail.splitlines() if detail else ([title] if title else [])
+        if title and detail and title.rstrip("… ") not in detail:
+            lines.insert(0, title)
+        for line in lines:
+            text.append(f"    {line}\n", style=N["ink"])
 
         if self.app.compact:
             text.append("    ")
@@ -427,6 +512,87 @@ class RefusalBox(Vertical):
             self.panel.focus()
             self.remove()
 
+
+
+class Mentions(Highlighter):
+    """@name in the bot's own color, as it is typed. The map is shared, never copied."""
+
+    def __init__(self, colors: dict[str, str]) -> None:
+        self.colors = colors
+
+    def highlight(self, text: Text) -> None:
+        paint_mentions(text, self.colors)
+
+
+class MentionPicker(Static):
+    """What an @ can reach: the room's bots, then the project's files.
+
+    A list above the prompt rather than a floating overlay — that is where claude code puts
+    it, and a widget in the layout needs no positioning of its own.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[tuple[str, str]] = []
+        self.cursor = 0
+        self.display = False
+
+    def offer(self, rows: list[tuple[str, str]], colors: dict[str, str]) -> None:
+        """Shows what matches, or closes if nothing does."""
+        self.rows = rows
+        self.display = bool(rows)
+        if not rows:
+            return
+        self.cursor = min(self.cursor, len(rows) - 1)
+        text = Text()
+        for index, (value, kind) in enumerate(rows):
+            aimed = index == self.cursor
+            bg = f" on {N['panel']}" if aimed else ""
+            color = colors.get(value.lower(), N["ink"]) if kind == "bot" else N["dim"]
+            text.append("  ▌ " if aimed else "    ", style=(CLICKABLE if aimed else N["frame"]) + bg)
+            shown = f"@{value}" if kind == "bot" else value
+            text.append(f"{clip(shown, 40):<42}", style=(f"bold {color}" if aimed else color) + bg)
+            text.append(f"{kind}\n", style=(N["dim"] if aimed else N["faint"]) + bg)
+        text.append("  ↑↓ ", style=CLICKABLE)
+        text.append("walk   ", style=N["dim"])
+        text.append("⇥ ", style=CLICKABLE)
+        text.append("insert   ", style=N["dim"])
+        text.append("esc ", style=CLICKABLE)
+        text.append("close", style=N["dim"])
+        self.update(text)
+        self.plain_text = text.plain
+
+    def close(self) -> None:
+        self.rows = []
+        self.cursor = 0
+        self.display = False
+
+    def move(self, step: int) -> None:
+        self.cursor = (self.cursor + step) % len(self.rows)
+
+
+class MessageInput(Input):
+    """The room's input. While the picker is open it lends it the arrows, ⇥ and esc.
+
+    `Input._on_key` only claims printable characters, so nothing else is disturbed — but
+    `enter` is one of its bindings, hence the `prevent_default` on the way out.
+    """
+
+    def on_key(self, event) -> None:
+        picker = self.app.picker
+        if not picker.rows:
+            return
+        if event.key in ("up", "down"):
+            picker.move(1 if event.key == "down" else -1)
+        elif event.key in ("tab", "enter"):
+            self.app.accept_completion()
+        elif event.key == "escape":
+            picker.close()
+        else:
+            return
+        event.stop()
+        event.prevent_default()
+        self.app.refresh_picker()
 
 
 class StartupPanel(Static):
@@ -627,7 +793,7 @@ class ThinkingScreen(Screen):
         text = Text()
         for moment, kind, item in events:
             if kind == "tool":
-                text.append_text(bubble.tool_line(item))
+                text.append_text(bubble.tool_line(item, full=True))
                 continue
             open_step = item is last
             text.append("  ▾ " if open_step else "  ┊ ", style=participant.color)
@@ -687,6 +853,13 @@ class Quorum(App):
             name: Participant(known_bots[name]) for name in room.members if name in known_bots
         }
         self.missing = [name for name in room.members if name not in known_bots]
+        # Shared by reference with every bubble and with the input's highlighter: a theme
+        # switch is one loop over this dict, and the whole room follows.
+        self.mention_colors = {
+            name: p.color for name, p in self.participants.items()
+        }
+        self.picker = MentionPicker()
+        self.paths: list[str] = []
         self.unread = 0
         # Permission requests wait their turn: one panel on screen at a time.
         self.waiting: list[PermissionPanel] = []
@@ -716,9 +889,15 @@ class Quorum(App):
             yield VerticalScroll(id="thread")
             yield Static(id="side")
         yield Static(id="status")
+        # Directly above the prompt it completes, the way claude code does it.
+        yield self.picker
         with Horizontal(id="input"):
             yield Static("◇ ", id="chevron")
-            yield Input(placeholder="type here — ⏎ send · @name to aim at a bot", id="message")
+            yield MessageInput(
+                placeholder="type here — ⏎ send · @name to aim at a bot",
+                id="message",
+                highlighter=Mentions(self.mention_colors),
+            )
 
     async def on_mount(self) -> None:
         self.query_one("#backlog", Static).display = False
@@ -739,9 +918,13 @@ class Quorum(App):
             await self.add(self.notice(f"✕ no bot named « {name} » in bots/", RED))
         self.startup = StartupPanel(self.participants)
         await self.add(self.startup)
-        self.set_interval(0.16, self.beat)
+        # Textual holds the bottom for us as a block grows in place — which is what our own
+        # scroll_end at mount time could never do: it fired before the bubble filled.
+        self.query_one("#thread", VerticalScroll).anchor()
+        self.set_interval(ANIM_RATE, self.tick)
         if self.room.evict_minutes:
             self.set_interval(30.0, self.evict_idle)
+        self.run_worker(self.scan_files())
         self.run_worker(self.start_all())
 
     # ── display ─────────────────────────────────────────────────────────────────────
@@ -750,7 +933,9 @@ class Quorum(App):
         """An announcement line in the thread. `plain_text` makes it readable without Rich."""
         block = Static()
         block.plain_text = text
-        block.update(Text(f"  {text}", style=color))
+        line = Text(f"  {text}", style=color)
+        paint_mentions(line, self.mention_colors)
+        block.update(line)
         return block
 
     def past_bubble(self, entry: Entry) -> Static:
@@ -758,27 +943,42 @@ class Quorum(App):
         if entry.kind == "system":
             return self.notice(f"^C {entry.text} · {entry.clock}", N["faint"])
         if entry.kind == "user":
-            bubble = Bubble(entry.author, "", N["ink"], entry.clock)
+            bubble = Bubble(entry.author, "", N["ink"], entry.clock,
+                            mention_colors=self.mention_colors)
         else:
             participant = self.participants.get(entry.author)
             color = participant.color if participant else N["dim"]
             role = participant.bot.role if participant else ""
-            bubble = Bubble(f"@{entry.author}", role, color, entry.clock, state="done")
+            bubble = Bubble(f"@{entry.author}", role, color, entry.clock, state="done",
+                            mention_colors=self.mention_colors)
             bubble.owner = entry.author if participant else None
+        bubble.compact = self.compact
         bubble.body = entry.text
         if entry.tools:
             bubble.body = f"({len(entry.tools)} tools) " + bubble.body
         bubble.redraw()
         return bubble
 
+    @staticmethod
+    def following(thread: VerticalScroll) -> bool:
+        """Whether the thread is still stuck to the bottom.
+
+        A thread shorter than its viewport parks at a **negative** offset — that is the
+        anchor holding the content down — and there is nothing to read back there. Without
+        that first clause the backlog banner announced unread messages on an empty room.
+        """
+        return thread.max_scroll_y == 0 or thread.scroll_offset.y >= thread.max_scroll_y - 1
+
     async def add(self, widget: Static) -> None:
-        """Mounts a block at the bottom of the thread, and only follows if we are there."""
+        """Mounts a block at the bottom of the thread.
+
+        The scrolling is the anchor's job — it holds the bottom while a block keeps growing,
+        and lets go the moment you scroll up. All that is left here is the unread count.
+        """
         thread = self.query_one("#thread", VerticalScroll)
-        at_bottom = thread.scroll_offset.y >= thread.max_scroll_y - 1
+        at_bottom = self.following(thread)
         await thread.mount(widget)
-        if at_bottom:
-            thread.scroll_end(animate=False)
-        else:
+        if not at_bottom:
             self.unread += 1
 
     @property
@@ -789,8 +989,12 @@ class Quorum(App):
             return True
         return density == "automatic" and self.size.width < 100
 
-    def beat(self) -> None:
-        """A single beat for the whole interface: three movements, not one more."""
+    def tick(self) -> None:
+        """The fast beat: three movements, not one more. Nothing here walks the thread.
+
+        That walk moved to `apply_density`, which now runs when the answer can change —
+        on a resize, or on a settings switch — and not once per frame.
+        """
         if self.startup is not None:
             self.startup.redraw()
             if all(p.startup in ("resumed", "fresh", "failed") for p in self.participants.values()):
@@ -806,20 +1010,15 @@ class Quorum(App):
                 participant.panel.phase += 1
                 if not participant.panel.has_focus:
                     participant.panel.redraw()
+        self.paint_side()
+        self.paint_status()
 
         # The thread is not always there: a reasoning screen may sit on top, and on closing
         # the widgets go before the timer.
         threads, backlogs = self.query("#thread"), self.query("#backlog")
         if not threads or not backlogs:
             return
-        thread = threads.first(VerticalScroll)
-        thread.set_class(self.compact, "compact")
-        for bubble in self.query(Bubble):
-            if bubble.compact != self.compact:
-                bubble.compact = self.compact
-                bubble.redraw()
-        self.paint_side()
-        if thread.scroll_offset.y >= thread.max_scroll_y - 1:
+        if self.following(threads.first(VerticalScroll)):
             self.unread = 0
         backlog_banner = backlogs.first(Static)
         if self.unread:
@@ -833,7 +1032,89 @@ class Quorum(App):
             )
         else:
             backlog_banner.display = False
-        self.paint_status()
+
+    def on_resize(self, event) -> None:
+        """Density is a question about the window, so it is answered when the window speaks.
+
+        It used to be re-asked at every frame, walking the whole thread to do it — and that
+        walk is what the movements were really waiting on.
+        """
+        self.apply_density()
+
+    def apply_density(self) -> None:
+        threads = self.query("#thread")
+        if not threads:
+            return
+        threads.first(VerticalScroll).set_class(self.compact, "compact")
+        for bubble in self.query(Bubble):
+            if bubble.compact != self.compact:
+                bubble.compact = self.compact
+                bubble.redraw()
+
+    # ── the @ list ──────────────────────────────────────────────────────────────────
+
+    async def scan_files(self) -> None:
+        """The project's files, once: git if it can, a capped walk otherwise.
+
+        ponytail: scanned at startup only. A file a bot creates mid-session is not offered
+        until the room is reopened — rescan on a timer the day that bites.
+        """
+        process = await asyncio.create_subprocess_exec(
+            "git", "ls-files", "-z",
+            cwd=str(self.room.folder),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await process.communicate()
+        if process.returncode == 0 and out:
+            self.paths = [p for p in out.decode(errors="replace").split("\0") if p][:FILE_CAP]
+            return
+        # Outside a repository: walk it ourselves, skipping what nobody means to mention.
+        found: list[str] = []
+        for path in self.room.folder.rglob("*"):
+            # On the relative path: the project itself may well live under a dotted folder.
+            relative = path.relative_to(self.room.folder)
+            if any(part.startswith(".") for part in relative.parts) or path.is_dir():
+                continue
+            found.append(str(relative))
+            if len(found) >= FILE_CAP:
+                break
+        self.paths = sorted(found)
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        if event.input.id == "message":
+            self.refresh_picker()
+
+    def refresh_picker(self) -> None:
+        """What the @ under the cursor can reach, or nothing at all."""
+        inputs = self.query("#message")
+        if not inputs:
+            return
+        field = inputs.first(Input)
+        query = mention_query(field.value, field.cursor_position)
+        if query is None:
+            self.picker.close()
+            return
+        self.picker.offer(
+            completions(query, list(self.participants), self.paths, PICKER_ROWS),
+            self.mention_colors,
+        )
+
+    def accept_completion(self) -> None:
+        """Replaces the @token being typed with what the list is aiming at.
+
+        A file keeps its @ — that is the claude code gesture, and `recipients` only matches
+        room members, so `@src/auth.py` wakes nobody.
+        """
+        field = self.query_one("#message", Input)
+        query = mention_query(field.value, field.cursor_position)
+        if query is None or not self.picker.rows:
+            return
+        value, _ = self.picker.rows[self.picker.cursor]
+        start = field.cursor_position - len(query)
+        field.value = f"{field.value[:start]}{value} {field.value[field.cursor_position:]}"
+        field.cursor_position = start + len(value) + 1
+        self.picker.close()
 
     def paint_side(self) -> None:
         """Beyond 160 columns the margins become useful: the room and the active bot."""
@@ -1219,6 +1500,8 @@ class Quorum(App):
             if not panel.is_mounted:
                 await self.add(panel)
                 panel.focus()
+                # You cannot decide what you cannot see: this one jumps, even mid-backlog.
+                panel.scroll_visible(animate=False)
             panel.queued = sum(
                 1 for other in self.waiting if other is not panel and other.decision is None
             )
@@ -1316,13 +1599,40 @@ class Quorum(App):
                     targeted.append(candidate)
         return targeted
 
+    @property
+    def at_once(self) -> int:
+        """How many bots may work together. A hand-edited nonsense value means all of them."""
+        wanted = str(self.settings.get("parallel", "all"))
+        return int(wanted) if wanted.isdigit() and int(wanted) > 0 else 0
+
     async def play_round(self, targets: list[Participant]) -> None:
-        """The bots of one wave answer in parallel, each in its own block."""
+        """The bots of one wave answer in parallel, each in its own block — up to the cap.
+
+        The block is created when the slot opens, not up front: the thread then reads in
+        speaking order, and a bot still queued does not sit there as an empty bubble.
+        """
+        limit = asyncio.Semaphore(self.at_once or len(targets))
+        waiting = targets[self.at_once:] if self.at_once else []
+        if waiting:
+            await self.add(
+                self.notice(
+                    "↳ " + ", ".join(f"@{p.name}" for p in waiting)
+                    + f" waits for a slot — {self.at_once} at a time",
+                    N["faint"],
+                )
+            )
+
+        async def take_turn(participant: Participant) -> None:
+            async with limit:
+                # ^C must not let the queue drain behind it.
+                if self.interrupted:
+                    return
+                participant.bubble = self.new_bubble(participant)
+                await self.add(participant.bubble)
+                await self.speak(participant)
+
         for participant in targets:
-            participant.bubble = self.new_bubble(participant)
-            await self.add(participant.bubble)
-        for participant in targets:
-            participant.turn = asyncio.create_task(self.speak(participant))
+            participant.turn = asyncio.create_task(take_turn(participant))
         await asyncio.gather(*(p.turn for p in targets), return_exceptions=True)
 
     def new_bubble(self, participant: Participant) -> Bubble:
@@ -1336,8 +1646,10 @@ class Quorum(App):
             time.strftime("%H:%M"),
             state="thinking",
             start=time.monotonic(),
+            mention_colors=self.mention_colors,
         )
         bubble.owner = participant.name
+        bubble.compact = self.compact
         participant.bubbles.append(bubble)
         bubble.thinking_visible = participant.bot.thinking_visible
         bubble.thinking = self.settings.get("thinking", "folded")
@@ -1476,6 +1788,7 @@ class Quorum(App):
             return
         participant.bot = bots.load(folder)
         participant.color = bot_color(participant.bot.hue)
+        self.mention_colors[participant.name] = participant.color
         self.run_worker(self.evict(participant))
 
     def action_compose(self) -> None:
@@ -1506,8 +1819,10 @@ class Quorum(App):
         self.settings = values
         apply_theme(self.wanted_theme())
         self.refresh_css()
+        self.apply_density()
         for participant in self.participants.values():
             participant.color = bot_color(participant.bot.hue)
+            self.mention_colors[participant.name] = participant.color
             if participant.bubble is not None:
                 participant.bubble.color = participant.color
                 participant.bubble.thinking = values["thinking"]
@@ -1523,7 +1838,8 @@ class Quorum(App):
         self.open_thinking(self.last_active())
 
     def action_follow(self) -> None:
-        self.query_one("#thread", VerticalScroll).scroll_end(animate=False)
+        """Back to the bottom, and stuck there again: anchoring re-arms and scrolls at once."""
+        self.query_one("#thread", VerticalScroll).anchor()
         self.unread = 0
 
     async def on_unmount(self) -> None:
