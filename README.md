@@ -1,36 +1,36 @@
-# Quorum
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/logo-dark.svg">
+    <img alt="Quorum" src="docs/logo-light.svg" width="76" height="76">
+  </picture>
+</p>
 
-One room, several agents, a single thread.
+<h1 align="center">Quorum</h1>
+
+<p align="center">One room, several agents, a single thread.</p>
+
+<p align="center">
+  <img alt="Two bots working in one thread: a permission comes up, it is refused with a reason, and the work is handed over by name" src="docs/room.gif" width="900">
+</p>
+
+<p align="center"><sub>Recorded against the scripted test agent — the interface is real, the waiting is not.</sub></p>
 
 Quorum is a terminal application where you talk with several AI agents at once, in a single
 conversation, like a team chat. Each bot has its role, its model, its tools and its
 permissions. They really work — they read files, run commands, call MCP servers — and they
-can call each other out with `@name`. Permission requests come up to the user, who allows,
-refuses, or refuses and explains why.
+can call each other out with `@name`.
 
-```
-◈ pair / ~/dev/atlas · turn 12                                ◐1 ▸1
+## What it does that the others do not
 
-  ▌ you · 14:02
-    @scout look at how we validate tokens, and @forge run the auth tests.
-    Change nothing for now.
-
-  ▌ @scout  research · 14:02  ⠹ thinking · 0:18
-    ┊ 6 earlier tools
-    ▸ fs · reads src/auth/jwt.py              ✓ 0.4s
-        def verify(token): …
-    ┊ Comparing Two Validation Paths
-
-  ◆ @forge asks for permission                             · 1 more waiting
-    rm -rf .venv && uv sync
-    1 ✓  Allow
-    2 ✓✓ Allow for this session
-    3 ✕  Reject
-    1-9 decide · r refuse with a reason · esc back to typing
-
-◇ type while they work…▏
-⠹@scout  ◆@forge                              ^C interrupt · 0:18
-```
+- **One thread, several agents.** Not a tab per agent, and not a chain of hand-offs you
+  cannot see. Everybody writes into the same conversation, and you read it like a chat.
+- **Permission comes up to you.** When a bot wants to run something, it stops and asks. You
+  allow, or you **refuse and say why** — the bot reads the reason and comes back with
+  something else, in the thread, where the other bots can see it too.
+- **You can watch a bot work.** Its milestones, its commands, what they answered, which
+  files it touched. Live, in full screen, and back to your place in the thread.
+- **Any ACP agent, mixed freely.** Gemini, Claude Code, Codex — a bot is just a command to
+  launch, and two vendors can sit in the same room.
 
 ## Install
 
@@ -78,22 +78,43 @@ quorum review          # open a room directly
   .env              what is machine-specific, and nothing else
 ```
 
+<p align="center">
+  <img alt="The home screen: five rooms across three projects, five bots, two providers" src="docs/home.gif" width="900">
+</p>
+
+A room belongs to a project, and several rooms can look at the same one from different
+angles. Both shipped rooms start with `folder = "."`: they follow your terminal until the
+first time you open one, and then they settle in that project — home shows `opens here` for
+a room that has not been opened yet.
+
+## Watching a bot work
+
+`^R` from the thread, or click any block a bot wrote.
+
+<p align="center">
+  <img alt="The reasoning screen: milestones, commands, their output, files touched, timeline" src="docs/reasoning.gif" width="900">
+</p>
+
+The thread keeps only the milestone titles; the bodies open here. Command output arrives a
+second or two after the command ends — that is not a slow interface, it is where the output
+actually comes from, and the screen says so while it waits.
+
+<details>
+<summary><b>Every key</b></summary>
+
 **At home** — `↑↓` walk · `⏎` open · `n` new room · `b` new bot ·
 `,` settings · `^Q` quit.
 
-**In a room** — `⏎` send · `@` propose the bots then the project's files, `↑↓` walk and
-`⇥` insert · `1`…`9` decide a permission · `r` refuse with a reason ·
+**In a room** — `⏎` send · `1`…`9` decide a permission · `r` refuse with a reason ·
 `^C` interrupt the turn · **click a block** to see how it was written ·
 `^R` watch the last active bot work · `^B` its card ·
 `^O` set up the room · `^G` settings · `end` follow the stream ·
 `^Q` back to home.
 
-A mention wears the color of the bot it reaches — as you type it, and in the thread,
-including in what the bots write to each other. An `@` that matches nobody stays plain ink:
-that is what tells you it will be read by no one.
-
 **In a bot card** — `⇥` next field · `^S` save · `esc` discard. In the permission table:
 `a` add · `e` edit the pattern · `d` change the decision · `x` remove · `⇧↑↓` reorder.
+
+</details>
 
 ## What comes with it
 
@@ -115,11 +136,6 @@ And two rooms:
 | `review` | `@scout` `@critic` | reading a change apart: neither member can touch a file |
 | `pair` | `@forge` `@scout` | one changes, the other checks |
 
-Both ship with `folder = "."`: they follow your terminal until the first time you open one,
-and then they settle in that project — the folder is written into `room.toml` and the room
-stays there. Home shows `opens here` for a room that has not been opened yet. To move one,
-change its folder in the room screen (`^O`); `n` creates a room in the folder you are in.
-
 ## A bot is a folder
 
 ```
@@ -129,6 +145,10 @@ change its folder in the room screen (`^O`); `n` creates a room in the folder yo
   policy.toml    its permissions — first matching rule wins
   settings.json  its settings — isolates the bot from the machine's personal MCP servers
 ```
+
+<p align="center">
+  <img alt="The bot card: role, model, the permission table, and how much power it adds up to" src="docs/card.png" width="900">
+</p>
 
 Everything is editable by hand; the card (`^B`) writes exactly those files. Its permission
 table reads one pattern per rule, and writes back exactly what it shows:
@@ -166,10 +186,7 @@ These points come from trials against the real protocol, not from the documentat
   For Gemini, we pick it up from the local telemetry log — it arrives **~5 s after** the
   tool ends, in one block. The interface holds that delay (`✓ 0.6s · output on the way`)
   and says so when it never comes. Without that log, or with another provider, the thread
-  shows the commands without their answers. While a bot works, a tool takes **one row and
-  three lines** whatever it ran — the whole of it is in `^R`. A permission request is the
-  exception: it is never cut, and it shows the command from `rawInput` rather than the
-  agent's shortened title. You cannot allow what you have not read.
+  shows the commands without their answers.
 - **`session/load` resumes nothing with Gemini CLI 0.59.** The agent does announce
   `loadSession: true`, but answers "No previous sessions found for this project": the
   session is never written to disk. The resume code is there and tested; meanwhile, the
@@ -178,9 +195,6 @@ These points come from trials against the real protocol, not from the documentat
   `{"mcp": {"allowed": []}}` cuts the MCP servers, and `-e` with no valid extension cuts
   the extensions. The A2A servers of the user settings, however, still load.
 - **The token count only exists at the end of a turn.** Nothing to show during it.
-- **Bots answer in parallel, rounds do not.** `parallel` in the settings caps how many work
-  at once (`all` by default); a bot named *inside* a round is answered in the next one, never
-  mid-round. A queued bot opens its block when its slot does.
 - **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
   titles; the body opens in the reasoning screen.
 - **A policy file the engine cannot read is not an error.** `[[rules]]` instead of `[[rule]]`,
@@ -200,8 +214,24 @@ Twelve checks, with no network and no model: a scripted fake ACP agent plays the
 (permission, commented refusal, cancellation, rounds, resume, late outputs). No test
 dependency — `assert` statements and a `__main__`.
 
+The pictures above are rebuilt the same way, from a set that is committed with the code:
+
+```sh
+demo/render.sh          # every capture
+demo/render.sh room     # one of them
+```
+
+`demo/build.py` lays out a fake home — five rooms, five bots, two projects — and
+`demo/agent.py` plays a written scenario instead of calling a model. Nothing in a recording
+is drawn by hand, and a change to the interface is one command away from being on show
+again. It needs [vhs](https://github.com/charmbracelet/vhs) and ffmpeg.
+
 ## Choices
 
 Python and [Textual](https://textual.textualize.io/), managed with `uv`. A single
 dependency. No database: files. The ACP client is about 250 lines and depends on nothing.
 Everything in English, interface and identifiers alike.
+
+## License
+
+MIT.
