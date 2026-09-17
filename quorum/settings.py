@@ -29,6 +29,16 @@ def home() -> Path:
     return Path(os.environ.get("QUORUM_HOME", Path.home() / ".quorum"))
 
 
+def short(path: Path | str) -> str:
+    """A path as a human writes it: the home folder collapsed back to `~`.
+
+    A header that spells the account name out in full gives thirty identical characters to
+    every line, and puts that name in every screenshot anyone ever takes.
+    """
+    text, base = str(path), str(Path.home())
+    return "~" + text[len(base):] if text == base or text.startswith(base + "/") else text
+
+
 def seed(path: Path) -> Path:
     """First run: the starter bots and rooms, copied once.
 

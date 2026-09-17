@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -199,8 +200,14 @@ class Bubble(Static):
                 text.append_text(self.tool_line(tool, output=tool is self.tools[-1]))
 
         body = Text()
+        # Wrapped here rather than left to rich: the indent belongs to the block, and rich
+        # would only put it on the first line of a long answer, dropping the rest against
+        # the left edge.
+        room = max(24, (self.size.width or 96) - 4)
         for line in self.body.rstrip().splitlines():
-            body.append(f"    {line}\n", style=N["ink"])
+            for piece in textwrap.wrap(line, room, break_long_words=False,
+                                       break_on_hyphens=False) or [""]:
+                body.append(f"    {piece}\n", style=N["ink"])
         paint_mentions(body, self.mention_colors)
         text.append_text(body)
 
@@ -747,8 +754,16 @@ class ThinkingScreen(Screen):
 
             text.append_text(divider("FILES TOUCHED", width))
             if participant.files:
+                # Relative to the room's folder, the way the tool lines already read: the
+                # absolute path is the same forty characters on every row, and it carries
+                # the account name into every screenshot.
+                base = participant.folder or self.app.room.folder
                 for path, action in participant.files.items():
-                    text.append(f"  {path}", style=N["ink"])
+                    try:
+                        shown = str(Path(path).relative_to(base))
+                    except ValueError:
+                        shown = config.short(path)
+                    text.append(f"  {shown}", style=N["ink"])
                     text.append(f"  {action}\n", style=N["faint"])
             else:
                 text.append("  none so far\n", style=N["faint"])
@@ -902,7 +917,7 @@ class Quorum(App):
     async def on_mount(self) -> None:
         self.query_one("#backlog", Static).display = False
         self.query_one("#header", Static).update(
-            Text(f"◈ quorum · {self.room.name} · {self.room.folder}", style=N["dim"])
+            Text(f"◈ quorum · {self.room.name} · {config.short(self.room.folder)}", style=N["dim"])
         )
         for entry in self.transcript.entries:
             await self.add(self.past_bubble(entry))

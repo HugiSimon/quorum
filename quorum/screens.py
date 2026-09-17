@@ -547,7 +547,7 @@ class RoomScreen(Navigable):
         yield Static(id="header")
         with VerticalScroll(id="body"):
             yield TextField("name", self.room.name, "name", "the room's name")
-            yield TextField("folder", str(self.room.folder), "folder",
+            yield TextField("folder", config.short(self.room.folder), "folder",
                             "where the bots work")
             yield MemberList(self.known, self.room.members)
             yield Static(divider("AMONG THEMSELVES", 70))
@@ -667,7 +667,7 @@ class SettingsScreen(Navigable):
         self.query_one("#providers", Static).update(text)
         self.query_one("#footer", Static).update(
             Text.assemble(self.standard_footer(),
-                          (f"  ·  {config.home()}", N["faint"]))
+                          (f"  ·  {config.short(config.home())}", N["faint"]))
         )
         self.query(Step).first().focus()
 
