@@ -48,15 +48,18 @@ Nothing is compiled: the script installs [uv](https://docs.astral.sh/uv/) if it 
 then quorum as a tool — its own isolated environment, a `quorum` command in `~/.local/bin`.
 To remove it: `uv tool uninstall quorum`.
 
-You need at least one agent that speaks **ACP** (Agent Client Protocol):
+You need at least one agent that speaks **ACP** (Agent Client Protocol). Three are set up
+for you, and any other one goes in by hand:
 
-| Provider | Command |
+| Harness | Command |
 |---|---|
 | Gemini CLI | `gemini --acp` |
-| Claude Code | `npx @zed-industries/claude-code-acp` |
-| Codex | `npx @zed-industries/codex-acp` |
+| opencode | `opencode acp --pure` |
+| Claude Code | `npx @agentclientprotocol/claude-agent-acp` |
+| anything else | whatever you type |
 
-Quorum is tied to none of them: a bot simply declares the command to launch.
+Pick one in the bot card and quorum writes what that agent really reads —
+[how each one works](#the-harness-how-each-one-is-set-up).
 
 ## Run
 
@@ -140,30 +143,142 @@ And two rooms:
 
 ```
 ~/.quorum/bots/forge/
-  bot.toml       name, role, hue, command, model, capabilities
-  system.md      its role — replaces the agent's system prompt
-  policy.toml    its permissions — first matching rule wins
-  settings.json  its settings — isolates the bot from the machine's personal MCP servers
+  bot.toml       name, role, hue, harness, command, model, capabilities
+  system.md      its role — it replaces the agent's system prompt
+  …              its harness's own file: policy.toml for gemini, opencode.json for opencode
 ```
+
+**Quorum owns keys, not files.** A save replaces the keys it claims and leaves every other
+one alone, so a block you added by hand — or one from a version of the agent younger than
+quorum — is still there afterwards, and the card reads your edit back instead of reverting
+it. Which keys, per harness, is [right below](#the-harness-how-each-one-is-set-up).
+
+A rule the chosen agent has no way to express is **not written**. The table says which, and
+why, instead of writing the nearest thing that happens to fit.
 
 <p align="center">
   <img alt="The bot card: role, model, the permission table, and how much power it adds up to" src="docs/card.png" width="900">
 </p>
 
-Everything is editable by hand; the card (`^B`) writes exactly those files. Its permission
-table reads one pattern per rule, and writes back exactly what it shows:
+Everything is editable by hand; the card (`^B`) writes exactly the files listed above. Its
+permission table reads one pattern per rule, and writes back exactly what it shows:
 
-| pattern | the rule it writes |
+| pattern | what it names |
 |---|---|
-| `shell:git *` | that root command, `commandPrefix` |
-| `shell~push` | a regex over the arguments, `argsPattern` — `git push`, but not `git log` |
+| `shell:git *` | that command and whatever follows it |
+| `shell~push` | a regex over the arguments — `git push`, but not `git log`. Gemini only |
 | `fs:read` `fs:write` `fs:replace` `fs:list` `fs:search` `fs:glob` | one file tool each |
 | `net:fetch` `net:search` · `mcp:vault` | the network tools · one MCP server |
-| `tool:anything_else` | a tool this table does not name — another provider's, an MCP one |
+| `tool:anything_else` | a tool this table does not name — another agent's, an MCP one |
 | `everything else` | no criteria: what is left. **The last line of every shipped bot, and it asks** |
+
+The same patterns land somewhere different for every agent, and some of them do not land at
+all. Each section below says what its own agent does with them.
 
 Whatever depends on the machine (company certificate, proxy) goes through the bot's `env`
 block as `${VARIABLE}`, resolved from `~/.quorum/.env`. See `.env.example`.
+
+## The harness: how each one is set up
+
+A harness is the agent a bot runs on. It is a `Step` in the bot card, and changing it
+rewrites the bot's files at the next `^S` — the card lists which ones before you press it,
+and the old agent's file is left on disk rather than deleted.
+
+Everything below was measured against the real agents, not read in a manual:
+`uv run python tools/harness_check.py <harness> [model]` boots one, sends a prompt that
+writes a file, and reports whether the role arrived and whether the permission came up.
+
+<details>
+<summary><b>Gemini CLI</b> — <code>gemini --acp</code></summary>
+
+**How it works.** Nothing is merged into a config file: the levers are argv and environment,
+rebuilt at every launch. The role goes through `GEMINI_SYSTEM_MD`, the model through `-m`,
+the permissions through `--policy` pointed at the bot's own `policy.toml`. And
+`--approval-mode default`, without which the agent decides alone and **no permission ever
+comes up**.
+
+**What you edit.** `policy.toml` — one `[[rule]]` per line of the card, decreasing priority,
+first match wins. `settings.json` holds the isolation: `{"mcp": {"allowed": []}}` cuts the
+machine's personal MCP servers, and `-e none` names an extension that does not exist, which
+is enough to load none of yours.
+
+**What it cannot express.** Nothing. The card's vocabulary was read off gemini.
+
+**Measured.** It waves its own read-only tools through before your policy: `echo` runs
+without asking, and the permission comes up as soon as something is written. The A2A servers
+of your user settings still load — no lever found for those.
+
+</details>
+
+<details>
+<summary><b>opencode</b> — <code>opencode acp --pure</code></summary>
+
+**How it works.** One file, `opencode.json` in the bot folder, named by `OPENCODE_CONFIG`.
+Quorum writes four keys and leaves the rest alone: `permission`, `instructions` (your
+`system.md`), `model` and `small_model`. The `OPENCODE_DISABLE_*` family keeps the bot out
+of your project config and your external skills.
+
+**What you edit.** The same file, by hand or with your own agent — an `mcp` block, a
+provider, a key from a newer opencode. It survives every save, and the card reads your
+permission edits back.
+
+**What it cannot express.** A regex over shell arguments (`shell~…`): opencode matches
+command names, not regexes. And `fs:read`, `fs:list`, `fs:search`, `fs:glob`, `net:search`:
+it gates editing, the shell and the web, not those. The card marks them `not written` rather
+than writing a key the agent would ignore.
+
+**Measured.** The `agent` block is **never opened by the ACP bridge**. A `permission` or a
+`prompt` under `agent.<name>` is read by nothing: the bot answers normally and runs its
+commands without asking anyone. Everything belongs at the top level, and the role goes
+through `instructions`. This is exactly the shape that reads like a working configuration
+and is not one.
+
+</details>
+
+<details>
+<summary><b>Claude Code</b> — <code>npx @agentclientprotocol/claude-agent-acp</code></summary>
+
+**How it works.** Nothing on disk reaches it. Its bridge takes its configuration in
+`session/new`, so quorum sends the role as the system prompt, the allow and deny lists as
+the SDK's `allowedTools` and `disallowedTools`, and `settingSources: []`.
+
+**What you edit.** `settings.json` in the bot folder, in Claude's own shape —
+`permissions.allow` / `.ask` / `.deny`, with specifiers like `Bash(git:*)`, `Read`,
+`mcp__vault__*`. That file is quorum's record and what the card reads back; quorum
+translates it into the session at every start.
+
+**What it cannot express.** A regex over shell arguments. `fs:list`, because Claude has no
+listing tool of its own — a directory is read with `Glob` or through the shell. And a
+blanket allow or deny on the last line: there is no mode for either, so name the tools.
+
+**Measured.** The bridge reads **your own `~/.claude`** — your plugins, your hooks, your
+`defaultMode` — unless the session says otherwise; a bot set up without that answered with
+a line from a personal plugin and ran its command without asking. And pointing
+`CLAUDE_CONFIG_DIR` at the bot folder takes the credentials away with the settings
+(`Authentication required`), so the login stays where it is.
+
+The bridge version is pinned in `quorum/harness.py` — change it there if your npm refuses it.
+
+</details>
+
+<details>
+<summary><b>Any other ACP agent</b> — <code>other</code></summary>
+
+**How it works.** Quorum launches the command you give it, with the arguments and the
+environment you give it, and configures nothing at all.
+
+**What you edit.** `command`, `args` and the `[env]` block of `bot.toml` — the card edits
+the first two. The agent's own configuration is yours to write, wherever that agent keeps
+it, and quorum never opens it.
+
+**What you keep.** The thread, the permission panel, the refusal with a reason, the
+reasoning screen, `@name` handoffs. All of that is protocol, not configuration.
+
+**What you lose.** The permission table is greyed and says so: quorum translates no rule for
+an agent it has never met, and a table that pretended otherwise would be the worst thing in
+this program. The only model lever left is `session/set_model`, when the agent implements it.
+
+</details>
 
 ## A room is a folder
 
@@ -191,9 +306,10 @@ These points come from trials against the real protocol, not from the documentat
   `loadSession: true`, but answers "No previous sessions found for this project": the
   session is never written to disk. The resume code is there and tested; meanwhile, the
   transcript is what carries the memory — and it works.
-- **A bot inherits the machine's personal settings.** A `settings.json` with
-  `{"mcp": {"allowed": []}}` cuts the MCP servers, and `-e` with no valid extension cuts
-  the extensions. The A2A servers of the user settings, however, still load.
+- **A bot inherits what its agent reads on the machine**, and every agent reads something
+  different. What each one takes, and what cuts it off, is in
+  [the harness sections](#the-harness-how-each-one-is-set-up) — that is where the
+  measurements live.
 - **The token count only exists at the end of a turn.** Nothing to show during it.
 - **The agents' thoughts arrive in English**, as titled blocks. The thread keeps only the
   titles; the body opens in the reasoning screen.
@@ -210,9 +326,21 @@ QUORUM_HOME=$PWD/.home uv run quorum    # your own home, next to the code
 ./verify.sh
 ```
 
-Twelve checks, with no network and no model: a scripted fake ACP agent plays the scenarios
-(permission, commented refusal, cancellation, rounds, resume, late outputs). No test
-dependency — `assert` statements and a `__main__`.
+Thirteen checks, with no network and no model: a scripted fake ACP agent plays the scenarios
+(permission, commented refusal, cancellation, rounds, resume, late outputs), and the harness
+translations are checked both ways on temporary files. No test dependency — `assert`
+statements and a `__main__`.
+
+What no offline check can answer is whether a real agent, configured the way quorum
+configures it, really stops and asks. That one boots the agent:
+
+```sh
+uv run python tools/harness_check.py opencode openai/gpt-5.6-luna
+```
+
+It starts the harness, opens a session, sends one prompt that writes a file, and reports
+whether the role arrived and whether the permission came up. It costs a model call, which is
+why it is not in `verify.sh`.
 
 The pictures above are rebuilt the same way, from a set that is committed with the code:
 

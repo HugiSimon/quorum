@@ -72,23 +72,66 @@ async def main() -> None:
             assert table.rules[1].pattern == "shell:git *", table.rules
             assert table.cursor == 1
 
-            # The gauge says what the rules allow, and warns honestly.
-            assert "read-only" in table.plain_text, "the table warns about what it does not cover"
+            # The table names the rule its own agent plays by, not a fixed sentence.
+            assert "read-only" in table.plain_text, table.plain_text
 
             await pilot.press("ctrl+s")
             await wait_for(pilot, lambda: not isinstance(app.screen, BotCard), "the close")
 
-        # The three files are there, and read back.
-        folder = root / "bots" / "watcher"
-        assert {f.name for f in folder.iterdir()} == {"bot.toml", "system.md", "policy.toml"}
-        back = bots.load(folder)
-        assert back.name == "watcher" and back.role == "watch"
-        assert back.hue == hue.hue and not back.own_copy
-        assert "You watch" in (folder / "system.md").read_text()
-        patterns = [(r.pattern, r.decision) for r in bots.read_rules(folder)]
-        assert ("shell:git *", "allow") in patterns, patterns
-        assert "watcher" in bots.load_all(root / "bots")
-    print("test_bot_screen: models from the session ok · hue ok · table ok · three files ok")
+            # The bot's own files, plus the ones its harness needs — the settings file is
+            # what keeps a new bot from inheriting the machine's personal MCP servers.
+            folder = root / "bots" / "watcher"
+            assert {f.name for f in folder.iterdir()} == {
+                "bot.toml", "system.md", "policy.toml", "settings.json"
+            }, sorted(f.name for f in folder.iterdir())
+            back = bots.load(folder)
+            assert back.name == "watcher" and back.role == "watch"
+            assert back.hue == hue.hue and not back.own_copy
+            assert "You watch" in (folder / "system.md").read_text()
+            patterns = [(r.pattern, r.decision) for r in bots.read_rules(folder)]
+            assert ("shell:git *", "allow") in patterns, patterns
+            assert "watcher" in bots.load_all(root / "bots")
+
+            # ── the same bot, moved to another agent ────────────────────────────────
+            app.push_screen(BotCard(root, "watcher", [], set()))
+            await pilot.pause(0.2)
+            screen = app.screen
+            step = next(s for s in screen.query(Step) if s.label == "harness")
+            assert step.value == "gemini", step.value
+            table = screen.query_one(RulesTable)
+            assert table.editable and "read-only" in table.plain_text
+
+            # A rule gemini reads and opencode has no key for.
+            table.focus()
+            await pilot.press("a")
+            screen.query_one("#pattern", Input).value = "fs:read"
+            await pilot.press("enter")
+            assert not table.blocked, "gemini expresses every one of them"
+
+            step.focus()
+            await pilot.press("right")
+            assert step.value == "opencode", step.value
+            # The command follows, because it was still the previous agent's default.
+            assert screen.query_one("#command", Input).value == "opencode"
+            assert "most precise key wins" in table.plain_text, table.plain_text
+            # `shell:git *` survives the move, `fs:read` does not — and the table says
+            # which and why instead of writing it anyway.
+            assert table.blocked, "the table names what opencode cannot express"
+            assert any("does not gate" in why for why in table.blocked.values()), table.blocked
+            assert "not written" in table.plain_text, table.plain_text
+
+            await pilot.press("ctrl+s")
+            await wait_for(pilot, lambda: not isinstance(app.screen, BotCard), "the close")
+
+            assert (folder / "opencode.json").exists(), "the new agent's file is written"
+            assert (folder / "policy.toml").exists(), "the old one stays on disk, unused"
+            assert bots.load(folder).provider == "opencode"
+            moved = [(r.pattern, r.decision) for r in bots.read_rules(folder)]
+            assert ("shell:git *", "allow") in moved, moved
+            assert not any(p == "fs:read" for p, _ in moved), "a blocked rule reaches no file"
+
+    print("test_bot_screen: models from the session ok · hue ok · table ok · "
+          "harness files ok · harness switch ok")
 
 
 if __name__ == "__main__":

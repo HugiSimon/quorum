@@ -16,6 +16,7 @@ from textual.screen import Screen
 from textual.widgets import Input, Static, TextArea
 
 from . import bot as bots
+from . import harness as harnesses
 from . import settings as config
 from .room import Room, room_summaries
 from .theme import (
@@ -201,16 +202,36 @@ class RulesTable(Static):
 
     can_focus = True
 
-    def __init__(self, rules: list[bots.Rule]) -> None:
+    def __init__(self, rules: list[bots.Rule], harness: str = "gemini") -> None:
         super().__init__()
         self.rules = rules or [bots.Rule("everything else", "ask_user")]
         self.cursor = 0
+        self.blocked: dict[int, str] = {}
+        self.retarget(harness)
+
+    def retarget(self, harness: str) -> None:
+        """Points the table at a harness: what it can say, and what it cannot."""
+        self.harness = harnesses.by_name(harness)
+        self.editable = self.harness.rules is not None
+        self.caption = (
+            self.harness.rules.caption if self.editable
+            else "managed by hand — quorum writes no permission for this agent"
+        )
+        self.restate()
+
+    def restate(self) -> None:
+        """Asks the harness which of these rules it has no way to express."""
+        if not self.editable:
+            self.blocked = {}
+            return
+        _, self.blocked = self.harness.rules.to_native(self.rules)
 
     def on_mount(self) -> None:
         self.redraw(False)
 
     def redraw(self, active: bool | None = None) -> None:
-        active = self.has_focus if active is None else active
+        active = self.has_focus if active is None else active and self.editable
+        self.restate()
         text = Text()
         text.append_text(divider("PERMISSIONS", 70, "first matching rule wins"))
         text.append(f"    {'PATTERN':<24}{'DECISION':<18}SCOPE\n", style=N["faint"])
@@ -219,20 +240,25 @@ class RulesTable(Static):
             decision, scope = line.labels
             color = {"allow": GREEN, "deny": RED, "ask_user": ATTENTION}[line.decision]
             bg = f" on {N['panel']}" if aimed else ""
+            stopped = index in self.blocked
+            ink = N["faint"] if not self.editable else N["ink"]
             text.append("  ▌ " if aimed else "    ", style=(CLICKABLE if aimed else N["frame"]) + bg)
-            text.append(f"{line.pattern:<24}", style=(f"bold {N['ink']}" if aimed else N["ink"]) + bg)
-            text.append(f"{decision:<18}", style=color + bg)
-            text.append(f"{scope:<16}\n", style=(N["dim"] if aimed else N["faint"]) + bg)
-        for key, what in (("a", "add"), ("e", "edit the pattern"),
-                          ("d", "decision"), ("x", "remove"), ("⇧↑↓", "reorder")):
-            text.append(f"    {key} " if key == "a" else f"{key} ",
-                        style=CLICKABLE if active else N["frame"])
-            text.append(f"{what}   ", style=N["dim"] if active else N["faint"])
-        text.append("\n")
-        text.append(
-            "    the agent's read-only tools come before the default rule\n",
-            style=N["faint"],
-        )
+            text.append(f"{line.pattern:<24}", style=(f"bold {N['ink']}" if aimed else ink) + bg)
+            text.append(f"{decision:<18}", style=(ATTENTION if stopped else color) + bg)
+            text.append(f"{'not written' if stopped else scope:<16}\n",
+                        style=(ATTENTION if stopped else (N["dim"] if aimed else N["faint"])) + bg)
+            if stopped:
+                # A rule the agent cannot express reaches no file: saying which, and why,
+                # is the whole difference between a permission and a decoration.
+                text.append(f"      ↳ {self.blocked[index]}\n", style=ATTENTION)
+        if self.editable:
+            for key, what in (("a", "add"), ("e", "edit the pattern"),
+                              ("d", "decision"), ("x", "remove"), ("⇧↑↓", "reorder")):
+                text.append(f"    {key} " if key == "a" else f"{key} ",
+                            style=CLICKABLE if active else N["frame"])
+                text.append(f"{what}   ", style=N["dim"] if active else N["faint"])
+            text.append("\n")
+        text.append(f"    {self.caption}\n", style=N["faint"])
         self.update(text)
         self.plain_text = text.plain
 
@@ -244,6 +270,8 @@ class RulesTable(Static):
 
     def on_key(self, event) -> None:
         key = event.key
+        if not self.editable:
+            return
         if key in ("up", "down"):
             event.stop()
             self.cursor = (self.cursor + (1 if key == "down" else -1)) % len(self.rules)
@@ -308,7 +336,9 @@ class BotCard(Navigable):
             if not self.is_new
             else bots.Bot(
                 name="new", role="", hue=30, folder=self.folder,
-                command="gemini", args=["--acp"], provider="gemini",
+                command=harnesses.GEMINI.command,
+                args=list(harnesses.GEMINI.args),
+                provider=harnesses.GEMINI.name,
             )
         )
         self.initial_role = (
@@ -325,6 +355,15 @@ class BotCard(Navigable):
             yield TextField("name", self.bot.name, "name", "the name typed after @")
             yield TextField("role", self.bot.role, "role", "two words: execution, watch…")
             yield Hue(self.bot.hue, self.taken)
+            yield Static(divider("HARNESS", 70, "the agent this bot runs on"))
+            yield Step("harness", harnesses.NAMES,
+                       _pick(harnesses.NAMES, self.bot.provider),
+                       note=harnesses.by_name(self.bot.provider).label,
+                       on_change=self.harness_changed)
+            yield TextField("command", self.bot.command, "command",
+                            "the binary that speaks ACP")
+            yield TextField("args", " ".join(self.bot.args), "args",
+                            "its launch arguments, separated by spaces")
             if self.models:
                 yield Step("model", self.models,
                            self.models.index(self.bot.model)
@@ -336,7 +375,7 @@ class BotCard(Navigable):
                                 "no session open — empty = the provider's default")
             yield Static(divider("ROLE", 70, "what it is, what it must do"))
             yield TextArea(self.initial_role, id="prompt")
-            yield RulesTable(bots.read_rules(self.folder))
+            yield RulesTable(bots.read_rules(self.folder), self.bot.provider)
             yield Static(id="gauge")
             yield Static(divider("SERVICES", 70))
             yield Step("workdir", ["shared", "own copy"],
@@ -363,20 +402,52 @@ class BotCard(Navigable):
         self.saved = False
         self.refresh_gauge()
 
+    def harness_changed(self, name: str) -> None:
+        """Switching agent re-aims the table, and offers the new agent's own command.
+
+        A command typed by hand is left alone: only one still at the previous agent's
+        default is moved forward, because that one was never a choice.
+        """
+        harness = harnesses.by_name(name)
+        previous = harnesses.by_name(self.query_one(RulesTable).harness.name)
+        command, args = self.query_one("#command", Input), self.query_one("#args", Input)
+        if (command.value.strip() == previous.command
+                and args.value.split() == list(previous.args)):
+            command.value = harness.command
+            args.value = " ".join(harness.args)
+        step = next(s for s in self.query(Step) if s.label == "harness")
+        step.note = harness.label
+        step.redraw()
+        self.query_one(RulesTable).retarget(name)
+        self.query_one(RulesTable).redraw()
+        self.saved = False
+        self.refresh_gauge()
+
     def on_text_area_changed(self, event) -> None:
         self.saved = False
 
     def refresh_gauge(self) -> None:
         """The gauge says what the rules really allow, promising nothing more."""
-        rules = self.query_one(RulesTable).rules
-        level, phrase = bots.power(rules)
-        words = {1: "minimal", 3: "moderate", 5: "high", 7: "total"}
+        table = self.query_one(RulesTable)
+        rules = table.rules
         text = Text()
         text.append_text(divider("POWER", 70))
-        text.append("  " + "█" * (level * 2), style=ATTENTION)
-        text.append(f"  {words.get(level, 'high')}\n", style=N["ink"])
-        for piece in phrase.split(" ; "):
-            text.append(f"    {piece.strip().rstrip('.')}\n", style=N["dim"])
+        if not table.editable:
+            # No table, no gauge: a number computed from rules nobody reads would be the
+            # same lie in a bar chart.
+            text.append("  —  not governed from here\n", style=N["dim"])
+            text.append(f"    {table.caption}\n", style=N["faint"])
+        else:
+            level, phrase = bots.power(rules)
+            words = {1: "minimal", 3: "moderate", 5: "high", 7: "total"}
+            text.append("  " + "█" * (level * 2), style=ATTENTION)
+            text.append(f"  {words.get(level, 'high')}\n", style=N["ink"])
+            for piece in phrase.split(" ; "):
+                text.append(f"    {piece.strip().rstrip('.')}\n", style=N["dim"])
+            if table.blocked:
+                text.append(f"    {len(table.blocked)} rule"
+                            f"{'s' if len(table.blocked) > 1 else ''} this agent cannot "
+                            f"express — they are not written\n", style=ATTENTION)
         self.query_one("#gauge", Static).update(text)
 
         name = self.query_one("#name", Input).value or "unnamed"
@@ -388,6 +459,17 @@ class BotCard(Navigable):
         preview.append(f"@{name}", style=f"bold {bot_color(hue)}")
         preview.append(f"  {role}", style=N["dim"])
         preview.append("   Tests are green, one file touched.\n", style=N["ink"])
+        chosen = self.query_one(RulesTable).harness
+        if chosen.name != self.bot.provider:
+            # Changing agent rewrites files: which ones is said here, before ^S, not after.
+            preview.append(f"\n  ^S writes @{name} as a {chosen.name} bot:\n", style=ATTENTION)
+            for file in ("bot.toml", "system.md") + chosen.files:
+                preview.append(f"    · {file}\n", style=N["dim"])
+            left = [f for f in harnesses.by_name(self.bot.provider).files
+                    if f not in chosen.files]
+            if left and not self.is_new:
+                preview.append(f"    {', '.join(left)} stays on disk, unused\n",
+                               style=N["faint"])
         self.query_one("#preview", Static).update(preview)
 
         header = Text()
@@ -430,12 +512,12 @@ class BotCard(Navigable):
             role=self.query_one("#role", Input).value.strip(),
             hue=self.query_one(Hue).hue,
             folder=self.root / "bots" / name,
-            command=self.bot.command,
-            args=list(self.bot.args),
+            command=self.query_one("#command", Input).value.strip(),
+            args=self.query_one("#args", Input).value.split(),
             env=dict(self.bot.env),
             model=(steps.get("model") if "model" in steps
                    else self.query_one("#model", Input).value.strip()) or None,
-            provider=self.bot.provider,
+            provider=steps.get("harness", self.bot.provider),
             workdir="copy" if steps.get("workdir") == "own copy" else "shared",
             can_mention=steps.get("mention") == "yes",
             thinking_visible=steps.get("thinking") == "visible",

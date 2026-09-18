@@ -127,26 +127,46 @@ class AcpClient:
         )
         return self.capabilities
 
-    async def new_session(self, cwd: Path, mcp_servers: list[dict] | None = None) -> dict:
-        """Opens a session. The answer carries sessionId, the modes and the model list."""
-        return await self.request(
-            "session/new", {"cwd": str(cwd), "mcpServers": mcp_servers or []}
-        )
+    async def new_session(
+        self, cwd: Path, mcp_servers: list[dict] | None = None, meta: dict | None = None
+    ) -> dict:
+        """Opens a session. The answer carries sessionId, the modes and the model list.
+
+        `_meta` is how an agent that takes no configuration file is configured at all: the
+        role it plays, and what it may do, travel with the session itself.
+        """
+        params: dict = {"cwd": str(cwd), "mcpServers": mcp_servers or []}
+        if meta:
+            params["_meta"] = meta
+        return await self.request("session/new", params)
 
     async def load_session(
-        self, session_id: str, cwd: Path, mcp_servers: list[dict] | None = None
+        self, session_id: str, cwd: Path, mcp_servers: list[dict] | None = None,
+        meta: dict | None = None,
     ) -> dict:
         """Resumes a session across processes: the agent replays everything as notifications."""
-        return await self.request(
-            "session/load",
-            {"sessionId": session_id, "cwd": str(cwd), "mcpServers": mcp_servers or []},
-        )
+        params: dict = {
+            "sessionId": session_id, "cwd": str(cwd), "mcpServers": mcp_servers or [],
+        }
+        if meta:
+            params["_meta"] = meta
+        return await self.request("session/load", params)
 
     async def prompt(self, session_id: str, text: str) -> dict:
         """Blocks until the end of the turn and returns {stopReason, _meta.quota}."""
         return await self.request(
             "session/prompt",
             {"sessionId": session_id, "prompt": [{"type": "text", "text": text}]},
+        )
+
+    async def set_model(self, session_id: str, model_id: str) -> Any:
+        """Points an open session at another model.
+
+        The agent announces what it has in `session/new`; this is the only lever there is
+        for an agent quorum does not configure by file, and the safety net for one it does.
+        """
+        return await self.request(
+            "session/set_model", {"sessionId": session_id, "modelId": model_id}
         )
 
     def cancel(self, session_id: str) -> None:

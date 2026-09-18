@@ -121,10 +121,16 @@ def load(folder: Path) -> Bot:
         can_mention=bool(conf.get("can_mention", True)),
         thinking_visible=bool(conf.get("thinking_visible", True)),
         speaks_unprompted=bool(conf.get("speaks_unprompted", True)),
-        provider=conf.get(
-            "provider", "gemini" if "gemini" in conf["command"] else "other"
-        ),
+        provider=conf.get("provider")
+        or harness_of(conf["command"], conf.get("args", [])),
     )
+
+
+def harness_of(command: str, args=None) -> str:
+    """The harness of a bot.toml that does not name one, read off its command."""
+    from . import harness as harnesses
+
+    return harnesses.detect(command, list(args or []))
 
 
 def load_all(root: Path) -> dict[str, Bot]:
@@ -208,7 +214,17 @@ def toml_to_pattern(fields: dict) -> str:
 
 
 def read_rules(folder: Path) -> list[Rule]:
-    """A bot's rules, in decreasing priority order — the first one wins."""
+    """A bot's rules, in decreasing priority order — the first one wins.
+
+    They are read wherever the bot's own harness keeps them. `policy.toml` is not a layer
+    above the others: it is gemini's own file, and a bot on another agent has none.
+    """
+    from . import harness as harnesses
+
+    if (folder / "bot.toml").exists():
+        own = harnesses.read_rules(folder, load(folder))
+        if own is not None:
+            return own
     file = folder / "policy.toml"
     if not file.exists():
         return [Rule(EVERYTHING, "ask_user")]
@@ -239,8 +255,12 @@ def power(rules: list[Rule]) -> tuple[int, str]:
     )
 
 
-def write_bot(folder: Path, bot: Bot, role: str, rules: list[Rule]) -> None:
-    """Writes a bot's three files. A bot stays a folder, editable by hand."""
+def write_bot(folder: Path, bot: Bot, role: str, rules: list[Rule]) -> dict[int, str]:
+    """Writes a bot's own files, then whatever its harness needs.
+
+    A bot stays a folder, editable by hand — and of the harness's file, quorum replaces
+    only the keys it claims. Returns the rules the harness cannot express, by index.
+    """
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "system.md").write_text(role.rstrip() + "\n", encoding="utf-8")
 
@@ -258,14 +278,9 @@ def write_bot(folder: Path, bot: Bot, role: str, rules: list[Rule]) -> None:
     lines += ["", "[env]"] + [f"{k} = {_toml_value(v)}" for k, v in bot.env.items()]
     (folder / "bot.toml").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
 
-    (folder / "policy.toml").write_text(
-        write_toml(
-            [("[[rule]]", rule_to_toml(rule, 100 - index * 5))
-             for index, rule in enumerate(rules)],
-            header="first matching rule wins, decreasing priority",
-        ),
-        encoding="utf-8",
-    )
+    from . import harness as harnesses
+
+    return harnesses.write(folder, bot, role, rules)
 
 
 def launch(
@@ -275,8 +290,8 @@ def launch(
 ) -> tuple[str, list[str], dict[str, str]]:
     """Returns the (command, args, env) triple, ready for asyncio.
 
-    The Gemini-specific levers are only set when the command is one: a Claude Code or Codex
-    bot keeps exactly what its bot.toml declares.
+    The levers come from the bot's harness row; a bot on no known harness keeps exactly
+    what its bot.toml declares.
 
     `telemetry` is the only path by which command output comes back: the agent does not
     send it in the stream. Without that log, the thread shows commands without what they
@@ -293,28 +308,17 @@ def launch(
         else:
             env[key] = resolved
 
+    from . import harness as harnesses
+
     args = list(bot.args)
-    if bot.provider == "gemini":
-        # Absolute: the agent resolves these against its own cwd, which is the work folder.
-        bot = replace(bot, folder=bot.folder.resolve())
-        if (bot.folder / "system.md").exists():
-            env["GEMINI_SYSTEM_MD"] = str(bot.folder / "system.md")
-        if (bot.folder / "settings.json").exists():
-            env["GEMINI_CLI_SYSTEM_SETTINGS_PATH"] = str(bot.folder / "settings.json")
-        if (bot.folder / "policy.toml").exists():
-            args += ["--policy", str(bot.folder / "policy.toml")]
-        # Without this mode, the agent decides on its own and no permission request comes up.
-        args += ["--approval-mode", "default"]
-        # A bot does not inherit the machine's personal extensions: its tools come from its
-        # policy and from the MCP servers passed to session/new. A name that does not exist
-        # is enough to load none. (The A2A servers of the user settings do still load: no
-        # lever found.)
-        args += ["-e", "none"]
-        if bot.model:
-            args += ["-m", bot.model]
-        if telemetry is not None:
-            telemetry.parent.mkdir(parents=True, exist_ok=True)
-            env["GEMINI_TELEMETRY_ENABLED"] = "true"
-            env["GEMINI_TELEMETRY_TARGET"] = "local"
-            env["GEMINI_TELEMETRY_OUTFILE"] = str(telemetry)
+    extra_args, extra_env = harnesses.extras(bot.folder, bot)
+    args += extra_args
+    env.update(extra_env)
+    # Command output does not travel in the ACP stream; gemini alone writes it to a local
+    # log, and without that log the thread shows commands without what they answered.
+    if telemetry is not None and harnesses.by_name(bot.provider).outputs == "gemini-telemetry":
+        telemetry.parent.mkdir(parents=True, exist_ok=True)
+        env["GEMINI_TELEMETRY_ENABLED"] = "true"
+        env["GEMINI_TELEMETRY_TARGET"] = "local"
+        env["GEMINI_TELEMETRY_OUTFILE"] = str(telemetry)
     return bot.command, args, env

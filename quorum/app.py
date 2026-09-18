@@ -22,6 +22,7 @@ from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.widgets import Input, Static
 
 from . import bot as bots
+from . import harness
 from .screens import Home, BotCard, SettingsScreen, RoomScreen
 from .acp import AcpError, AcpClient, write_file
 from .room import (
@@ -1247,8 +1248,8 @@ class Quorum(App):
         telemetry_log = getattr(self, "telemetry_log", None) or (
             workshop / f"{participant.name}.telemetry.jsonl"
         )
-        outputs = (
-            self.room.keep_outputs and participant.bot.provider == "gemini"
+        outputs = self.room.keep_outputs and (
+            harness.by_name(participant.bot.provider).outputs == "gemini-telemetry"
         )
         if not outputs:
             telemetry_log = None
@@ -1299,7 +1300,11 @@ class Quorum(App):
             try:
                 # An agent that ignores session/load would leave the room shut forever.
                 resumed = await asyncio.wait_for(
-                    participant.client.load_session(previous, participant.folder), RESUME_TIMEOUT
+                    participant.client.load_session(
+                        previous, participant.folder,
+                        meta=harness.session_meta(participant.bot.folder, participant.bot),
+                    ),
+                    RESUME_TIMEOUT,
                 )
                 participant.session = {"sessionId": previous, **(resumed or {})}
                 participant.seen = int(self.room_state["seen"].get(participant.name, 0))
@@ -1308,12 +1313,34 @@ class Quorum(App):
             except (AcpError, asyncio.TimeoutError):
                 participant.memory_lost = True
 
-        participant.session = await participant.client.new_session(participant.folder)
+        participant.session = await participant.client.new_session(
+            participant.folder,
+            meta=harness.session_meta(participant.bot.folder, participant.bot),
+        )
+        await self.aim_model(participant)
         participant.seen = 0
         participant.startup = "fresh"
         self.room_state["sessions"][participant.name] = participant.session["sessionId"]
         self.room_state["seen"][participant.name] = 0
         write_state(self.room, self.room_state)
+
+    async def aim_model(self, participant: Participant) -> None:
+        """Asks a fresh session for the model the bot names, when it is not there already.
+
+        Most harnesses take the model from their own configuration, written when the card
+        was saved. This is what covers the one that takes none — and what catches an agent
+        that opened on something else.
+        """
+        wanted = participant.bot.model
+        models = participant.session.get("models") or {}
+        offered = {m.get("modelId") for m in models.get("availableModels") or []}
+        if not wanted or wanted == models.get("currentModelId") or wanted not in offered:
+            return
+        try:
+            await participant.client.set_model(participant.session["sessionId"], wanted)
+        except AcpError:
+            # Best effort: the agent keeps whatever its own configuration already set.
+            pass
 
     async def ensure_ready(self, participant: Participant) -> bool:
         """Wakes an evicted bot before its turn; does nothing if it is already there."""
@@ -1772,9 +1799,15 @@ class Quorum(App):
         if name in self.participants and self.participants[name].bot.thinking_visible:
             self.push_screen(ThinkingScreen(name, bubble))
 
-    def known_models(self) -> list[str]:
-        """The model list comes from the open sessions — never from a hard-coded name."""
-        for participant in self.participants.values():
+    def known_models(self, name: str | None = None) -> list[str]:
+        """The model list comes from the open sessions — never from a hard-coded name.
+
+        A bot's own session first: in a room where two harnesses sit together, the other
+        one's list is not a list of models this bot could ever run.
+        """
+        own = self.participants.get(name or "")
+        candidates = [own] if own is not None else list(self.participants.values())
+        for participant in candidates:
             models = (participant.session.get("models") or {}).get("availableModels") or []
             if models:
                 return [m.get("modelId", "") for m in models if m.get("modelId")]
@@ -1785,7 +1818,7 @@ class Quorum(App):
         target = self.last_active()
         taken = {p.bot.hue for p in self.participants.values() if p.name != target}
         self.push_screen(
-            BotCard(self.room.root.parents[1], target, self.known_models(), taken),
+            BotCard(self.room.root.parents[1], target, self.known_models(target), taken),
             self.bot_saved,
         )
 
